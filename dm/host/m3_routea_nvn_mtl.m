@@ -3636,6 +3636,7 @@ static struct {
     float blend_color[4]; int64_t copy_stride, copy_image_stride;
 } S;
 static NSMutableDictionary<NSData *, NvBoundProgram *> *g_bound_program_cache;
+static _Atomic uint64_t g_bound_program_count;
 static void program_binding_apply(program_stage_binding bound[6], const p_bind_program *binding) {
     if (!binding) return;
     uint32_t mask = (uint32_t)binding->stages & 0x3fu;
@@ -3676,16 +3677,42 @@ static void program_binding_apply(program_stage_binding bound[6], const p_bind_p
                  (unsigned long long)program->serial, mask, program->nstage);
     }
 }
+// A snapshot address/serial is an object lifetime, not shader identity. Keeping
+// it in this process-wide cache retains new programs for identical shader bytes.
+// The small direct-mapped memo avoids rehashing immutable source serials.
+static int program_shader_digest(const prog_t *source, unsigned index, uint8_t out[32]) {
+    typedef struct { uint64_t serial; unsigned index; uint8_t digest[32]; } memo;
+    static memo hashes[128];
+    memo *hit = &hashes[(source->serial * 6 + index) % 128];
+    if (source->serial && hit->serial == source->serial && hit->index == index) {
+        memcpy(out, hit->digest, 32);
+        return 1;
+    }
+    const NVNshaderData *shader = &source->sd[index];
+    if (!shader->control || !shader->data) return 0;
+    uint32_t code_bytes = 0, own = 0;
+    memcpy(&code_bytes, (const uint8_t *)shader->control + 0x704, 4);
+    memcpy(&own, (const uint8_t *)shader->control + 0x20, 4);
+    if (!code_bytes || code_bytes >= (1u << 24)) return 0;
+    size_t control_bytes = own >= 0x760 && own < 0x880 ? own : 0x880;
+    CC_SHA256_CTX hash;
+    CC_SHA256_Init(&hash);
+    CC_SHA256_Update(&hash, shader->control, (CC_LONG)control_bytes);
+    CC_SHA256_Update(&hash, (const void *)(uintptr_t)shader->data, code_bytes);
+    CC_SHA256_Final(out, &hash);
+    *hit = (memo){.serial = source->serial, .index = index};
+    memcpy(hit->digest, out, 32);
+    return 1;
+}
 static const prog_t *program_binding_compose(const program_stage_binding bound[6]) {
-    uint64_t key[6][3] = {{0}};
+    uint8_t key[6][33] = {{0}};
     unsigned count = 0;
     for (unsigned stage = 0; stage < 6; stage++) {
         const prog_t *source = bound[stage].program;
         unsigned index = bound[stage].data_index;
-        if (!source || index >= source->nstage) continue;
-        key[stage][0] = (uint64_t)(uintptr_t)source;
-        key[stage][1] = source->serial;
-        key[stage][2] = (uint64_t)index + 1;
+        if (!source || index >= source->nstage || index >= 6) continue;
+        if (!program_shader_digest(source, index, key[stage] + 1)) return NULL;
+        key[stage][0] = 1;
         count++;
     }
     if (!count) return NULL;
@@ -3694,22 +3721,23 @@ static const prog_t *program_binding_compose(const program_stage_binding bound[6
     NvBoundProgram *entry = g_bound_program_cache[cache_key];
     if (!entry) {
         entry = [NvBoundProgram new];
-        prog_t *composite = &entry->program;
-        memset(composite, 0, sizeof *composite);
-        for (unsigned stage = 0; stage < 6; stage++) {
-            const prog_t *source = bound[stage].program;
-            unsigned index = bound[stage].data_index;
-            if (!source || index >= source->nstage) continue;
-            if (!composite->nstage) composite->magic = source->magic;
-            unsigned packed = composite->nstage++;
-            composite->sd[packed] = source->sd[index];
-            composite->stage_hint[packed] = (uint8_t)stage;
-        }
-        composite->serial = nvn_new_serial();
-        composite->composite = 1;
+        entry->program.serial = nvn_new_serial();
+        entry->program.composite = 1;
         g_bound_program_cache[cache_key] = entry;
+        atomic_fetch_add_explicit(&g_bound_program_count, 1, memory_order_relaxed);
     }
-    return &entry->program;
+    // Metadata addresses may have moved since an identical shader was cached.
+    // Refresh them on the replay thread; never retain a retired source snapshot.
+    prog_t *composite = &entry->program;
+    composite->nstage = 0;
+    for (unsigned stage = 0; stage < 6; stage++) if (key[stage][0]) {
+        const prog_t *source = bound[stage].program;
+        unsigned packed = composite->nstage++;
+        composite->magic = source->magic;
+        composite->sd[packed] = source->sd[bound[stage].data_index];
+        composite->stage_hint[packed] = (uint8_t)stage;
+    }
+    return composite;
 }
 static NSString *route_a_dimension(int target) {
     switch (target) {
