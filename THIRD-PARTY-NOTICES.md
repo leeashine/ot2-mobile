@@ -20,6 +20,11 @@ failure hints in `dm/host/m3_routea_nvn_mtl.m` are ported from
 Copyright (c) 2026 seedds. These portions use the same MIT license text below
 (also preserved in this repository's `LICENSE`), with this copyright notice.
 
+The slice-only geometry-to-vertex-layer folding and layered render-pass setup
+in that file are also ported from nxnative at the same commit (lines 2785–2795,
+2918, 3034, 3053–3077, 3088–3090, 3165–3183, 4234 and 6921–6924).
+Copyright (c) 2026 seedds; MIT. This does not add a general geometry backend.
+
 Distributors of this source or a resulting binary must preserve the following
 notice.
 

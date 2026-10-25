@@ -52,9 +52,36 @@ The entry loading, all-uint/mixed-uint render-target selection, integer blending
 
 The post-port 300-second run had zero `R16Uint` pipeline errors and zero guest Breaks, but still presented uniform purple. Its sampled peak RSS was 2,670.1 MiB (295 samples at approximately one second), and peak kernel `phys_footprint` was 2,777 MiB. The acceptance criterion “non-purple scene” is therefore **not met**.
 
-At diagnostic frame 2400, 42 color targets were registered for dumping. The first purple target in the observed post-processing chain was serial 15055, pass 182402, fragment key `8dc677a6f9e3de9f_b`; its scene-color input 15052 was dark but not purple. This pass also sampled a 32³ LUT (serial 1759) written by pass 182401 (`a7aa2c119e1ea39f_b`). Subsequent targets 15056/15057/15058 propagated purple into the present target. The LUT producer's vertex metadata (`25dadade83d69970_b`) supplies `entry_layer=main0_l`, and the captured geometry metadata (`439bed623be839b2_b`) supplies `gs_slice`; the current classic loader does not select those layer entries. That is a concrete next compatibility check, not yet proof of the remaining purple root cause.
+At diagnostic frame 2400, 42 color targets were registered for dumping. The first purple target in the observed post-processing chain was serial 15055, pass 182402, fragment key `8dc677a6f9e3de9f_b`; its scene-color input 15052 was dark but not purple. This pass also sampled a 32³ LUT (serial 1759) written by pass 182401 (`a7aa2c119e1ea39f_b`). Subsequent targets 15056/15057/15058 propagated purple into the present target. At that checkpoint the LUT producer's vertex metadata (`25dadade83d69970_b`) supplied `entry_layer=main0_l`, and the geometry metadata (`439bed623be839b2_b`) supplied `gs_slice`, but the classic loader did not select those layer entries.
+
+## Slice geometry and layered LUT follow-up
+
+The slice-geometry fold and layered render-pass setup are ported from nxnative `0f99c353d3abc334c39855d691afdfab40f4639f`. Only matching `gs_slice`/`layer_from` metadata with an available layer-writing vertex entry is accepted; unresolved geometry remains fail-closed. This does not implement a general geometry-shader backend.
+
+The 180-second local run `lut-layer-trial` selected the layer entry and rendered 32 layers, with no load failure for `439bed623be839b2_b`, no `R16Uint` pipeline error and no guest Break. The 32×32×32 RGB10A2 LUT readback contained nonzero data in every layer and 32 distinct per-layer SHA-256 values. Its 131,072-byte payload SHA-256 was `eb0a9894825697c54349347b6c4a482c8faf31f4df1c68563f6814d035058c35`.
+
+The final scene remained uniformly purple, but the failure boundary moved: frame 2400 tone-map output 15054 and following post-process output 15055 were no longer uniformly purple. Targets 15056/15057 were pure magenta, and their passes 182088/182089 recorded no write; final pass 182090 sampled 15057. The run also logged 95 distinct missing offline shader-map keys. At that checkpoint no particular missing key had been causally assigned to those two unwritten targets.
+
+The run used an external gfx snapshot pinned to Route-A commit `daff9d0d3be6a8c388c137dbc52a3baf2ce029dd`, not its concurrently edited working tree. The 4,697 uninitialized-FenceSync warnings remained: that branch skips sync binding rather than writing color, but an indirect resource-lifetime/order effect is not excluded. No fence behavior was changed.
+
+### Post-processing draw diagnosis
+
+A follow-up run reused the same binary with `DM_NVN_DRAWTRACE=1`. The two equivalent post-processing positions were numbered 15040/15041 in that run. Each had one draw, both with `pso=missing-vs`, `result=pipeline-unavailable` and zero encoded Metal draws; their vertex and fragment stages were absent, rather than rejected by the Metal compiler.
+
+| Position | Vertex lookup key | Fragment lookup key |
+|---|---|---|
+| First unwritten post-process target | `ad4856161a08096b` | `6bb30e3cbfeb5ef2` |
+| Second unwritten post-process target | `b09c0440d883a6a0` | `c6f312852de690d6` |
+
+All four keys also occurred in the previous run's missing-map list, and the active cache contained no corresponding `<key>_b` library. The local `lut-drawtrace-trial/missing-postprocess-shaders.tsv` records capture stems, lengths and SHA-256 values for the shader track; raw data stays outside the repository. This identifies the skipped writes, not a completed rendering fix.
+
+### Runtime-capture rebuild acceptance
+
+Processing the complete local pending directory produced 1,712 unique shaders, covering all previous 1,612 and the four missing post-process keys; 10,250 capture records were rejected by the existing validity checks. With `DOTNET_ROOT` set to the installed runtime, `dmsh_build.py` built 1,712/1,712 successfully into the private `cache-a/b-e83a95ef084e`, without symlinks or tool-source changes. The package and replacement profile tables live only under `~/local-work/nx/runtime-capture-all/`.
+
+Reusing the same 3-GiB host, the matched frame-2400 diagnostic window had zero missing-map keys versus 95 before. Both repaired programs had a cache-hit PSO and one encoded Metal draw; their targets, numbered 15052/15053 in that run, were recorded as written. A subsequent 240-second story-progression run reached a non-purple tavern scene with visible people, flames and dialogue (local screenshot `run-79539-frame-006900.png`). The picture remains visibly blurred, and the longer run exposed 102 new missing-map keys: this is not a claim of complete rendering or full-session map coverage.
 
 ## Known gaps
 
-- The scene still becomes purple after tone mapping even with the integer-output errors eliminated. Layered LUT generation and its shader entry selection remain unverified.
-- The one observed geometry shader is represented as a slice/layer operation and currently has no standalone Metal library in this classic backend.
+- The uniform-purple failure is resolved in the observed tavern scene, but blur and 102 newly observed missing-map keys remain in the longer sample.
+- Unmatched/general geometry shaders are still unsupported; only the metadata-verified slice operation is folded into the vertex stage.
