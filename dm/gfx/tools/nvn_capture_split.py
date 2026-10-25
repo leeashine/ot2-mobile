@@ -7,12 +7,14 @@ belong in a local build workspace, never in source control.
 
 Usage: nvn_capture_split.py <capture-dir> <package-dir> <shader-map.tsv>
                             <shader-facts.tsv> <shader-pairs.tsv>
+       nvn_capture_split.py --dedupe <capture-dir>
        nvn_capture_split.py --self-test
 """
 import collections
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import re
 import struct
@@ -63,16 +65,25 @@ def read_capture(meta_path):
     }
 
 
-def collect(capture_dir):
+PAIR_SNAPSHOT = '.nvn_capture_pairs.tsv'
+
+
+def collect(capture_dir, include_stems=None, occurrences=None, extra_pairs=()):
+    capture_dir = Path(capture_dir)
     shaders = {}
     programs = collections.defaultdict(dict)
     rejected = 0
-    for meta_path in sorted(Path(capture_dir).glob('*.meta.json')):
+    for meta_path in sorted(capture_dir.glob('*.meta.json')):
+        stem = meta_path.name[:-10]
+        if include_stems is not None and stem not in include_stems:
+            continue
         shader = read_capture(meta_path)
         if not shader:
             rejected += 1
             continue
         key = shader['key']
+        if occurrences is not None:
+            occurrences.setdefault(key, []).append(stem)
         old = shaders.get(key)
         if old and not split.same_shader(old['control_code'], (shader['control'], shader['code'])):
             raise ValueError(f'key collision {key}: {old["source"]} / {shader["source"]}')
@@ -86,7 +97,77 @@ def collect(capture_dir):
         key: (shader['source'], shader['stage'], shader['control'], shader['code'])
         for key, shader in shaders.items()
     })
-    return shaders, observed | separable, rejected
+    pairs = observed | separable | set(extra_pairs)
+    pair_path = capture_dir / PAIR_SNAPSHOT
+    if pair_path.is_file():
+        for line in pair_path.read_text().splitlines():
+            if not line or line.startswith('#'):
+                continue
+            pair = line.split('\t')
+            if len(pair) != 2 or not all(re.fullmatch(r'[0-9a-f]{16}', key) for key in pair):
+                raise ValueError(f'invalid preserved NVN pair row in {pair_path}: {line!r}')
+            pairs.add(tuple(pair))
+    for vertex, pixel in pairs:
+        if vertex not in shaders or pixel not in shaders:
+            raise ValueError(f'NVN pair references absent shader keys: {vertex} / {pixel}')
+        if shaders[vertex]['stage'] != 'vs' or shaders[pixel]['stage'] != 'ps':
+            raise ValueError(f'NVN pair has invalid stages: {vertex} / {pixel}')
+    return shaders, pairs, rejected
+
+
+def deduplicate(capture_dir):
+    directory = Path(capture_dir)
+    occurrences = {}
+    before_shaders, before_pairs, rejected = collect(directory, occurrences=occurrences)
+    keep = {min(stems) for stems in occurrences.values()}
+    duplicates = {stem for stems in occurrences.values() for stem in stems if stem not in keep}
+    if not duplicates:
+        after_shaders, after_pairs, _ = collect(directory)
+        if set(after_shaders) != set(before_shaders) or after_pairs != before_pairs:
+            raise ValueError('NVN collect changed shader or pair sets without deduplication')
+        return len(occurrences), len(keep), 0, len(before_shaders), len(before_pairs), rejected
+
+    stage = Path(tempfile.mkdtemp(prefix=f'.{directory.name}.dedupe-', dir=directory.parent))
+    backup = stage.with_name(stage.name + '.original')
+    remove_names = {stem + suffix for stem in duplicates for suffix in ('.meta.json', '.prefix.bin', '.control.bin')}
+    try:
+        for source in directory.iterdir():
+            if source.name in remove_names:
+                continue
+            if source.is_symlink() or not source.is_file():
+                raise ValueError(f'unexpected non-file in NVN capture directory: {source}')
+            os.link(source, stage / source.name)
+        staged_shaders, staged_pairs, _ = collect(stage)
+        if set(staged_shaders) != set(before_shaders) or staged_pairs != before_pairs:
+            snapshot = stage / (PAIR_SNAPSHOT + '.tmp')
+            with snapshot.open('w') as out:
+                out.write('# Pair associations preserved across per-key capture deduplication\n')
+                for vertex, pixel in sorted(before_pairs):
+                    out.write(f'{vertex}\t{pixel}\n')
+            os.replace(snapshot, stage / PAIR_SNAPSHOT)
+            staged_shaders, staged_pairs, _ = collect(stage)
+        if set(staged_shaders) != set(before_shaders) or staged_pairs != before_pairs:
+            raise ValueError('per-key deduplication cannot preserve nvn_capture_split.collect shader and pair sets')
+
+        directory.rename(backup)
+        try:
+            stage.rename(directory)
+            after_shaders, after_pairs, _ = collect(directory)
+            if set(after_shaders) != set(before_shaders) or after_pairs != before_pairs:
+                raise ValueError('post-dedup collect differs from the original shader or pair sets')
+        except BaseException:
+            if directory.exists():
+                shutil.rmtree(directory)
+            backup.rename(directory)
+            raise
+        shutil.rmtree(backup)
+        return sum(map(len, occurrences.values())), len(keep), len(duplicates), len(before_shaders), len(before_pairs), rejected
+    except BaseException:
+        if stage.exists():
+            shutil.rmtree(stage)
+        if backup.exists() and not directory.exists():
+            backup.rename(directory)
+        raise
 
 
 def write_outputs(shaders, pairs, package_dir, map_path, facts_path, pairs_path):
@@ -126,6 +207,7 @@ def write_outputs(shaders, pairs, package_dir, map_path, facts_path, pairs_path)
         out.write('# vertex key\tpixel key observed in one NVN program\n')
         for vertex, pixel in sorted(pairs):
             out.write(f'{vertex}\t{pixel}\n')
+    Path(str(map_path) + '.conflicts.tsv').write_text('')
 
 
 def self_test():
@@ -155,6 +237,13 @@ def self_test():
 def main():
     if sys.argv[1:] == ['--self-test']:
         self_test()
+        return
+    if len(sys.argv) == 3 and sys.argv[1] == '--dedupe':
+        try:
+            before, after, removed, shaders, pairs, rejected = deduplicate(sys.argv[2])
+        except (OSError, ValueError) as e:
+            raise SystemExit(f'[RED] NVN capture dedupe failed: {e}') from e
+        print(f'deduplicated complete captures: {before} -> {after}; removed {removed}; shaders {shaders}; pairs {pairs}; rejected {rejected}')
         return
     if len(sys.argv) != 6:
         raise SystemExit(__doc__)

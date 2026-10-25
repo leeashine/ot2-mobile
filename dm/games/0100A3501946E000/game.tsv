@@ -23,3 +23,9 @@ sys_resource	0x5000000
 
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	OCTOPATH TRAVELER II shaders
+
+# Static shader splitting finds no usable records in the compact LSLG archives.
+nvn_capture	on
+
+# Bounded first-run prompts toward the title/New Game screen; DM_KEYS seconds start with the Mac host.
+nvn_capture_keys	20:A*15/3
