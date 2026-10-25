@@ -7,6 +7,8 @@
 #include <sys/mman.h>
 module_t g_mod[MAX_MOD];
 int g_nmod = 1;
+struct dm_flags g_flag;
+void svc_guest_range(uint8_t **base, size_t *size) { *base = NULL; *size = 0; }
 static void (*made)(const uint64_t *);
 void gate_obs_set(int id, void (*fn)(const uint64_t *)) { assert(id == OBS_UE_MALLOC); made = fn; }
 int gate_obs_present(int id) { return id == OBS_UE_MALLOC; }

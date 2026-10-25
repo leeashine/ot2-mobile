@@ -7881,9 +7881,27 @@ void mtl_res_counts(uint32_t tick, const char *why) {
     mtl_res_count c;
     mtl_res_snapshot(&c);
     int dl, du; uint64_t da; nvn_dirty_slot_stats(&dl, &du, &da);
-    LOG("[nvn] 资源计数 拍 %u %s：渲染管线 %u 计算管线 %u 着色器 %u 深度模板 %u view非空 %u view槽 %u 存活贴图 %u 内存池存活 %u 内存池累计 %llu 采样器view非空 %u 脏页区间存活 %d 脏页区间累计 %llu c1缓冲 %u c1字节 %llu c1实际 %llu",
+    if (g_flag.dbg) {
+        unsigned programs = 0, packaged = 0, textures = 0;
+        uint64_t serial_min = UINT64_MAX, serial_max = 0;
+        pthread_mutex_lock(&g_smu);
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) {
+            uint64_t serial; memcpy(&serial, g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+            if (serial < serial_min) serial_min = serial;
+            if (serial > serial_max) serial_max = serial;
+            id object = (__bridge id)g_by_serial.vals[i];
+            if ([object isKindOfClass:[NvProg class]]) programs++;
+            else if ([object isKindOfClass:[NvPkg class]]) packaged++;
+            else textures++;
+        }
+        pthread_mutex_unlock(&g_smu);
+        LOG("[DEBUG-UE-MEM] serial_programs=%u serial_packaged=%u serial_textures=%u serial_min=%#llx serial_max=%#llx",
+            programs, packaged, textures, (unsigned long long)serial_min, (unsigned long long)serial_max);
+    }
+    LOG("[nvn] 资源计数 拍 %u %s：渲染管线 %u 计算管线 %u 着色器 %u 深度模板 %u view非空 %u view槽 %u 存活贴图 %u 内存池存活 %u 内存池累计 %llu 采样器view非空 %u 脏页区间存活 %d 脏页区间累计 %llu c1缓冲 %u c1字节 %llu c1实际 %llu 组合程序 %llu",
         tick, why, c.pso, c.cps, c.shaders, c.dss, c.view_nonnull, c.view_slots, c.live_tex,
-        c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data);
+        c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data,
+        (unsigned long long)atomic_load_explicit(&g_bound_program_count, memory_order_relaxed));
 }
 // 按请求截图（DM_NVN_SHOT_UI 用）：dm_gfx_shot_at(k, 路径) = 在当前出图帧之后第 k 帧截图；每帧出图时检查到期请求
 // Screenshot on request (used by DM_NVN_SHOT_UI): dm_gfx_shot_at(k, path) = take a screenshot at the kth frame after the current present frame; due requests are checked at every frame's present

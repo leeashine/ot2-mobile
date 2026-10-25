@@ -46,15 +46,51 @@ enum { NSLOT = 32 };
 
 static malloc_zone_t *g_zone;
 static _Atomic int64_t g_used, g_peak;   // bytes in use (usable sizes) and their high-water mark, for the [mem] line (one per 256 MB of new peak)
+static uint8_t *g_ot2_va;   // Matched build's virtual arena, not the host malloc zone.
+static _Atomic uint64_t g_debug_allocations, g_debug_guest_overlaps;
+static _Atomic uintptr_t g_debug_first_pointer;
+static void debug_allocation_range(void *p, size_t bytes) {
+    if (!g_flag.dbg) return;
+    void svc_guest_range(uint8_t **, size_t *);
+    uint8_t *base; size_t size;
+    svc_guest_range(&base, &size);
+    uintptr_t address = (uintptr_t)p, guest = (uintptr_t)base, empty = 0;
+    atomic_fetch_add(&g_debug_allocations, 1);
+    atomic_compare_exchange_strong(&g_debug_first_pointer, &empty, address);
+    if (base && address < guest + size && guest < address + bytes)
+        atomic_fetch_add(&g_debug_guest_overlaps, 1);
+}
+
 static void used(int64_t d) {
     int64_t after = atomic_fetch_add(&g_used, d) + d, peak = atomic_load(&g_peak);
     while (after > peak && !atomic_compare_exchange_weak(&g_peak, &peak, after)) {}
     if (after > peak && after >> 28 != peak >> 28) LOG("[mem] Unreal heap (host malloc zone) up to %.2f GB in use", after / 1073741824.0);
 }
+
+void dm_ue_memory_report(void) {
+    if (!g_flag.dbg || !g_zone) return;
+    LOG("[DEBUG-UE-MEM] zone_live=%lld zone_peak=%lld",
+        (long long)atomic_load(&g_used), (long long)atomic_load(&g_peak));
+    LOG("[DEBUG-UE-MEM] checked_zone_allocations=%llu overlapping_guest_reserve=%llu first_zone_pointer=%#llx",
+        (unsigned long long)atomic_load(&g_debug_allocations),
+        (unsigned long long)atomic_load(&g_debug_guest_overlaps),
+        (unsigned long long)atomic_load(&g_debug_first_pointer));
+    if (!g_ot2_va) return;
+    // OT2 constructor main+be717c sets base/end at +28/+30. The relocated
+    // vtable[0] (main+be746c) advances +50 and writes cursor-base to +670.
+    // These are read-only, independently sampled foreign guest fields.
+    uint64_t base = __atomic_load_n((uint64_t *)(g_ot2_va + 0x28), __ATOMIC_RELAXED);
+    uint64_t end = __atomic_load_n((uint64_t *)(g_ot2_va + 0x30), __ATOMIC_RELAXED);
+    uint64_t cursor = __atomic_load_n((uint64_t *)(g_ot2_va + 0x50), __ATOMIC_RELAXED);
+    if (end <= base || cursor < base) return;
+    LOG("[DEBUG-UE-MEM] arena_base=%#llx arena_capacity=%llu arena_cursor=%llu arena_tail=%lld",
+        (unsigned long long)base, (unsigned long long)(end - base),
+        (unsigned long long)(cursor - base), (long long)(end - cursor));
+}
 static size_t align_of(uint32_t a) { return a > 16 ? a : 16; }   // 0 = DEFAULT_ALIGNMENT, 16 bytes as Binned3 gives
 static void *alloc(size_t n, uint32_t a) {
     void *p = align_of(a) == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, align_of(a), n ? n : 1);
-    if (p) used((int64_t)malloc_size(p));
+    if (p) { size_t bytes = malloc_size(p); used((int64_t)bytes); debug_allocation_range(p, bytes); }
     return p;
 }
 static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
@@ -62,7 +98,11 @@ static void *realloc_aligned(void *p, size_t n, uint32_t a) {
     if (!p) return alloc(n, a);
     if (!n) { release(p); return NULL; }
     size_t old = malloc_size(p);
-    if (align_of(a) == 16) { void *q = malloc_zone_realloc(g_zone, p, n); if (q) used((int64_t)malloc_size(q) - (int64_t)old); return q; }
+    if (align_of(a) == 16) {
+        void *q = malloc_zone_realloc(g_zone, p, n);
+        if (q) { size_t bytes = malloc_size(q); used((int64_t)bytes - (int64_t)old); debug_allocation_range(q, bytes); }
+        return q;
+    }
     if (!((uintptr_t)p & (align_of(a) - 1)) && old >= n) return p;
     void *q = alloc(n, a); if (!q) return NULL;
     memcpy(q, p, old < n ? old : n); release(p); return q;
@@ -98,6 +138,8 @@ void dm_ue_malloc_install(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
         for (int k = 0; k < (int)(sizeof k_ue / sizeof k_ue[0]); k++) if (!strcmp(g_mod[i].build_id, k_ue[k].build)) {
             uint8_t *b = g_mod[i].base; int L = k_ue[k].layout;
+            if (L == UE4_20_SLOTS && g_mod[i].size >= 0x6eaead8)
+                g_ot2_va = b + 0x6eae470;
             if (*(uint32_t *)(b + k_ue[k].cut) != 0xd503201f) { LOG("[RED] %s: main is rewritten without the allocator cut (its patches.py): Unreal's own FMallocBinned3 runs", k_ue[k].what); return; }
             if (!k_ue[k].obj && !gate_obs_present(OBS_UE_MALLOC)) { LOG("[RED] %s: main is rewritten without the allocator gate (OBS of its patches.py): the allocator would have no vtable", k_ue[k].what); return; }
             memcpy(g_vt, b + k_ue[k].vtable, sizeof g_vt[0] * k_lay[L].nslot);   // the relocated vtable: the trivial slots stay the guest's

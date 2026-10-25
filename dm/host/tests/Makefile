@@ -4,6 +4,7 @@ B = build
 # tests that use the game profile need GAME=<base game title ID> (there is no default game); GINC only expands when used, so tests without the profile build as before
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 GAME_H = ../gen/$(GAME)/game_profile.h
+OT2_MEMORY_TEST = $(if $(filter 0100A3501946E000,$(GAME)),$(B)/t_ot2_memory_budget)
 M3_BINDING_TEST = $(if $(strip $(M3_GFX_DIR)),$(B)/t_m3_program_binding)
 M3_SNAPSHOT_TEST = $(if $(strip $(M3_GFX_DIR)),$(B)/t_m3_snapshot)
 run: $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pctl $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple
@@ -30,10 +31,12 @@ run: $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/
 	$(B)/t_haptics_apple
 	$(B)/t_nro
 	$(B)/t_uemalloc
+	$(OT2_MEMORY_TEST)
 	$(M3_BINDING_TEST)
 	$(M3_SNAPSHOT_TEST)
 run: $(B)/t_nro
 run: $(B)/t_uemalloc
+run: $(OT2_MEMORY_TEST)
 run: $(M3_BINDING_TEST)
 run: $(M3_SNAPSHOT_TEST)
 $(B)/t_m3_snapshot: t_m3_snapshot.m t_m3_snapshot_hle.c t_m3_runtime_stubs.h ../m3_routea_hle_nvn.c ../m3_routea_nvn_mtl.m $(GAME_H) | $(B)
@@ -42,6 +45,8 @@ $(B)/t_m3_snapshot: t_m3_snapshot.m t_m3_snapshot_hle.c t_m3_runtime_stubs.h ../
 $(B)/t_m3_program_binding: t_m3_program_binding.m ../m3_routea_nvn_mtl.m $(GAME_H) | $(B)
 	@test -n "$(M3_GFX_DIR)" || (echo "set M3_GFX_DIR to the classic-Metal gfx snapshot"; exit 1)
 	clang -arch arm64 -O1 -g -fobjc-arc -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0 $(GINC) -I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include -Wno-deprecated-declarations -Wno-format -o $@ $< -framework Cocoa -framework QuartzCore -framework Metal -framework ImageIO -framework UniformTypeIdentifiers -Wl,-dead_strip -Wl,-undefined,dynamic_lookup
+$(B)/t_ot2_memory_budget: t_ot2_memory_budget.c ../hle_svc.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_ot2_memory_budget.c
 $(B)/t_uemalloc: t_uemalloc.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_uemalloc.c
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
