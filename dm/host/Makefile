@@ -21,7 +21,7 @@ CFLAGS=-O1 -g -Wall -Wno-unused-function -arch arm64
 M3_GFX_DIR ?=
 ifneq ($(strip $(M3_GFX_DIR)),)
 CFLAGS += -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0
-M3_NVN_SRC = $(M3_GFX_DIR)/nvn/hle_nvn.c m3_routea_nvn_mtl.m \
+M3_NVN_SRC = m3_routea_hle_nvn.c m3_routea_nvn_mtl.m \
 	$(M3_GFX_DIR)/nvn/nvn_tex.c $(M3_GFX_DIR)/nvn/nvn_dirty.c \
 	m3_routea_nvn_refl.m $(M3_GFX_DIR)/tex/nvn_fmt_mtl.c \
 	$(M3_GFX_DIR)/tex/nvn_deswizzle.c $(M3_GFX_DIR)/tex/nvn_deswizzle_gpu.m \
@@ -29,7 +29,7 @@ M3_NVN_SRC = $(M3_GFX_DIR)/nvn/hle_nvn.c m3_routea_nvn_mtl.m \
 	$(M3_GFX_DIR)/nvn/nvn_entry.S
 GFX=$(sort $(wildcard ../gfx/*.c)) $(M3_NVN_SRC)
 GFX_H=$(sort $(wildcard $(M3_GFX_DIR)/nvn/*.h $(M3_GFX_DIR)/nvn/include/*.h $(M3_GFX_DIR)/tex/*.h))
-GFX_INC=-I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn/include
+GFX_INC=-I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include
 M3_HOST_SRC=m3_routea_bridge.c
 else
 # NVN null device + nn::vi + the Vulkan/OpenGL layers (dm/gfx/).

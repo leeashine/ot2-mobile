@@ -2490,7 +2490,7 @@ static RENC rp_begin_ex(int clear_only) {
         if (pd.depthAttachment.texture) {
             id<MTLTexture> t = pd.depthAttachment.texture;
             NSUInteger total = t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-            if (pd.depthAttachment.slice >= total) return nil;
+            if (pd.depthAttachment.slice >= total) { MLOG("【红】分层pass深度附件范围无效"); return nil; }
             nl = MIN(nl, total - pd.depthAttachment.slice);
         }
         if (nl != NSUIntegerMax && nl > 1) {
@@ -3140,6 +3140,16 @@ static int ot2_route_a_shader_mode(void) {
 }
 
 
+// nxnative MIT 0f99c35, dm/gfx/nvn/nvn_mtl.m:3040-3048,3072-3078.
+// Mode is established by DeviceSetDepthMode before any shader warm-up.
+static _Atomic int g_depth_zero, g_vs_loaded;
+void mtl_set_depth_zero(int on) {
+    if (atomic_exchange(&g_depth_zero, on) == on) return;
+    MLOG("深度入口模式: %s", on ? "near=0 → main0_z/main0_lz" : "near=-w → main0/main0_l");
+    int n = atomic_load(&g_vs_loaded);
+    if (n) MLOG("【红】深度模式改变时已有%d个VS载入，保留旧入口约定", n);
+}
+
 static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected, int layer) {
     BOOL route_a = ot2_route_a_shader_mode();
     NSString *dir = route_a ? route_a_shader_cache_dir() : g_msl_dir;
@@ -3195,7 +3205,21 @@ static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected, in
     if (rt_range_on()) o->range_ro=rt_range_bindings_ro(j);
     o->assumed_facts = route_a ? @{@"summary": j[@"facts_summary"]} : nil;
     o->facts_sha = route_a ? [j[@"facts_sha256"] copy] : nil;
-    NSString *entry = layer ? j[@"entry_layer"] : j[@"entry"];
+    NSString *entry = j[@"entry"];
+    if (stage == 0) {
+        atomic_fetch_add(&g_vs_loaded, 1);
+        int zero = atomic_load(&g_depth_zero);
+        NSString *field = layer ? (zero ? @"entry_layer_z" : @"entry_layer") : (zero ? @"entry_z" : @"entry");
+        if ([j[field] isKindOfClass:[NSString class]]) entry = j[field];
+        else {
+            static _Atomic int missing_depth_entry;
+            if (!atomic_exchange(&missing_depth_entry, 1))
+                MLOG("【红】顶点shader %s 缺少深度入口 %s", pc.UTF8String, field.UTF8String);
+            if (layer) return nil;
+        }
+        static _Atomic int logged[2];
+        if (!atomic_fetch_add(&logged[layer], 1)) MLOG("VS深度入口: %s shader=%s layer=%d", entry.UTF8String, pc.UTF8String, layer);
+    }
     o->fn = [lib newFunctionWithName:entry]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
     if (!o->fn) { MLOG("【红】着色器 %s 无入口 %s", pc.UTF8String, entry.UTF8String); return nil; }
     if (stage == 0) o->layer_out = layer || (t_lib_layer && !j[@"entry_layer"]);
