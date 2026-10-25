@@ -22,10 +22,11 @@
 #include <stdatomic.h>
 
 // Slot layouts: which slots the host fills and which do nothing (up to 6; 0 ends the list); the others keep the guest's own functions
-enum { UE5, UE4_27, UE5_6 };
+enum { UE5, UE4_27, UE5_6, UE4_20_SLOTS };
 static const struct { int nslot, malloc_, try_malloc, realloc_, try_realloc, free_, quantize, get_size, nothing[6]; } k_lay[] = {
     [UE5] = { 26, 6, 7, 8, 9, 10, 11, 12, { 13, 14, 15, 19 } },      // Trim, the TLS cache setup and teardown, DumpAllocatorStats
     [UE4_27] = { 21, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },
+    [UE4_20_SLOTS] = { 20, 3, 4, 5, 6, 7, 8, 9, { 10, 11, 12, 16 } },   // OT2: 20 slots, same core ABI, no OnMallocInitialized
     [UE5_6] = { 32, 6, 7, 8, 9, 10, 13, 14, { 15, 16, 17, 18, 19, 23 } },   // Trim, the four TLS cache calls, DumpAllocatorStats
 };
 static const struct { const char *build, *what; int layout; uint64_t obj, vtable, cut; } k_ue[] = {
@@ -33,6 +34,8 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
     { "9fe60a212cff9b9a3656ab63d4f882e5", "Octopath Traveler 0 1.0.5", UE5, 0x68022c8, 0x5b06f38, 0x12e40 },
     // DRAGON QUEST VII Reimagined 1.2.0: no fixed object (0: made by GCreateMalloc, given at the gate), its vtable (main+0x5e4c0e8, 21 slots), the cut constructor call (main+0x32758dc)
     { "f7ec03e4cb9de3bd8319d4e899d2e9cc", "DRAGON QUEST VII Reimagined 1.2.0", UE4_27, 0, 0x5e4c0e8, 0x32758dc },
+    // OCTOPATH TRAVELER II 1.1.1: malloc(0x1c38), x19 holds the object at the post-constructor gate; 20 relocated vtable entries.
+    { "65619a04b8a04b10d44f9996ef141062", "OCTOPATH TRAVELER II 1.1.1", UE4_20_SLOTS, 0, 0x642c048, 0xbd4348 },
     // Pikmin 4 1.1.1 (Unreal Engine 4.26.2, the 4.27 slot layout: TryMalloc / TryRealloc call +0x18 / +0x28, slot 17 returns 1): made by GCreateMalloc, its vtable (main+0x8da4758, 21 slots),
     // the cut constructor call (main+0x353f788)
     { "060f827bd2b38703e9ea11e3210d89bc", "Pikmin 4 1.1.1", UE4_27, 0, 0x8da4758, 0x353f788 },

@@ -1,6 +1,13 @@
 // Source: d2r-mobile/dm/gfx/nvn/nvn_mtl.m; commit 9393b00ea9aca52d9254214da93738f26582562f; MIT.
 // OT2 integration snapshot: ot2-ios-route-a/host/nvn_hle/nvn/nvn_mtl.m;
 // commit 60a7f0bc213e. Route-B offline shader selection below is local.
+// Integer fragment entry loading/selection and failure hints ported from
+// nxnative/dm/gfx/nvn/nvn_mtl.m@0f99c353d3abc334c39855d691afdfab40f4639f,
+// lines 2914, 3099-3106, 4183-4214, 4232-4233, 4343-4353, 7602-7610.
+// Copyright (c) 2026 seedds. MIT; see LICENSE and THIRD-PARTY-NOTICES.md.
+// Slice-only GS folding/layered passes also ported from that nxnative commit:
+// lines 2785-2795, 2918, 3034, 3053-3077, 3088-3090, 3165-3183, 4234, 6921-6924.
+// Other geometry programs remain unsupported and draws with them fail closed.
 // NVN 空设备的 Metal 执行层，见 nvn_mtl.h。
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #ifndef _DARWIN_C_SOURCE
@@ -1867,7 +1874,8 @@ static void rr_reset(void);
 static RENC g_enc;
 // 当前渲染通道的目标信息：rp_begin 时由附件定一次，通道内各绘制共用（管线键、深度模板、视口 / 剪裁都只依赖它）
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial, reg_gen, ser_gen, range_dirty; int range_external, range_depth_nonro, layered; __unsafe_unretained id<MTLTexture> range_color, range_depth; } g_pass;
+static int g_rp_layered;
 static id<MTLRenderPipelineState> g_enc_pso; static id<MTLDepthStencilState> g_enc_dss;
 // 本编码器上已设的固定功能状态（同值不重发，与 g_enc_pso 同一生命周期：开新渲染编码器时作废）。valid 位：0 视口 1 剪裁 2 剔除 3 朝向 4 填充 5 深度偏移 6 混合色 7 模板参考
 // Fixed-function state already set on this encoder (not resent if unchanged; same lifetime as g_enc_pso: invalidated when a new render encoder is opened). valid bits: 0 viewport 1 scissor 2 cull 3 winding 4 fill 5 depth bias 6 blend color 7 stencil reference
@@ -2467,6 +2475,30 @@ static RENC rp_begin_ex(int clear_only) {
         pd.visibilityResultBuffer = g_vis;
     }
     g_enc_vis = 0; g_enc_has_vis = g_vis_on;
+    g_pass.layered = g_rp_layered;
+    if (g_rp_layered) {
+        NSUInteger nl = NSUIntegerMax;
+        for (int i = 0; i < 8; i++) {
+            MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i];
+            id<MTLTexture> t = c.texture; if (!t) continue;
+            NSUInteger total = t.textureType == MTLTextureType3D ? MAX(t.depth >> c.level, 1u) :
+                t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+            NSUInteger first = t.textureType == MTLTextureType3D ? c.depthPlane : c.slice;
+            if (first >= total) { MLOG("【红】分层pass颜色附件范围无效"); return nil; }
+            nl = MIN(nl, total - first);
+        }
+        if (pd.depthAttachment.texture) {
+            id<MTLTexture> t = pd.depthAttachment.texture;
+            NSUInteger total = t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
+            if (pd.depthAttachment.slice >= total) return nil;
+            nl = MIN(nl, total - pd.depthAttachment.slice);
+        }
+        if (nl != NSUIntegerMax && nl > 1) {
+            pd.renderTargetArrayLength = nl;
+            PD("L %llu layered pass: %lu layers", g_stat_pass + 1, (unsigned long)nl);
+            static int logged; if (logged++ < 4) MLOG("分层pass: %lu layers", (unsigned long)nl);
+        }
+    }
     pg_render(pd, (NSUInteger)R.rt.n);
     { void td_note(id pd, NSUInteger nc); td_note(pd, (NSUInteger)R.rt.n);
       void ts_note(id pd, NSUInteger nc); ts_note(pd, (NSUInteger)R.rt.n); }
@@ -2549,7 +2581,8 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro; const char *builtin; uint64_t logged; char key[65]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off; id assumed_facts; NSString *facts_sha;
+@interface NvShader : NSObject { @public id<MTLFunction> fn, fn_u, fn_m; uint8_t mask_m, color_known; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro; const char *builtin; uint64_t logged; char key[65]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off; id assumed_facts; NSString *facts_sha;
+    int gs_loc, lay_loc, layer_out; char gs_comp, lay_comp;
     // 上次编好的参数缓冲
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass;
@@ -2557,7 +2590,7 @@ static void shmap_load(void) {
     id<MTLLibrary> bflib; int bflib_tried; NSMutableDictionary<NSString *, id<MTLFunction>> *bffn; } @end   // bflib：可读 tile 版本 <键>_bf（合并 B 第 2 步） | bflib: readable-tile version <key>_bf (merge B step 2)
 @implementation NvShader @end
 #include "nvn/nvn_pso_skey.h"
-@interface NvProg : NSObject { @public NvShader *sh[6]; NSDictionary *route_a_probe[6]; NSString *route_a_control[6]; __unsafe_unretained NvShader *fl_sh[6]; uint8_t fl_ok, fl_img, fl_img_w; uint32_t fl_cmask; } @end   // fl_*：按绘制要用的反射摘要（udc_note_draw），按 sh[] 核对后复用 | fl_*: reflection summary used per draw (udc_note_draw), reused after checking against sh[]
+@interface NvProg : NSObject { @public NvShader *sh[6]; int gs_unresolved; NSDictionary *route_a_probe[6]; NSString *route_a_control[6]; __unsafe_unretained NvShader *fl_sh[6]; uint8_t fl_ok, fl_img, fl_img_w; uint32_t fl_cmask; } @end   // fl_*：按绘制要用的反射摘要（udc_note_draw），按 sh[] 核对后复用 | fl_*: reflection summary used per draw (udc_note_draw), reused after checking against sh[]
 @implementation NvProg @end
 @interface NvBoundProgram : NSObject { @public prog_t program; } @end
 @implementation NvBoundProgram @end
@@ -2831,10 +2864,12 @@ static void pso_user_record(const char *fmt, ...) {
 // 而 iOS 进程缺省软上限 256；别的幕新建着色器还会涨）。这里把文件映射进内存后立刻关掉，用内存数据建库；映射随库的数据对象释放时解除
 // Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
 // while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
+static _Thread_local int t_lib_layer;
 static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st) || st.st_size <= 0) { if (fd >= 0) close(fd); if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"打不开 %@", path]}]; return nil; }
     size_t len = (size_t)st.st_size; void *m = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
+    t_lib_layer = m != MAP_FAILED && memmem(m, len, "render_target_array_index", 25) != NULL;
     if (m == MAP_FAILED) { if (err) *err = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"映射失败 %@", path]}]; return nil; }
 #ifdef DM_SHELL
     // 壳：使用者的电脑上没有苹果的着色器编译器时（tools/d2rm_pack.py 的不调编译器模式，gfx/tools/nometal_run.py），「库文件」里放的是
@@ -3105,7 +3140,7 @@ static int ot2_route_a_shader_mode(void) {
 }
 
 
-static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected) {
+static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected, int layer) {
     BOOL route_a = ot2_route_a_shader_mode();
     NSString *dir = route_a ? route_a_shader_cache_dir() : g_msl_dir;
     NSError *e = nil;
@@ -3121,6 +3156,20 @@ static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected) {
         id decoded = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
         j = [decoded isKindOfClass:[NSDictionary class]] ? decoded : nil;
     }
+    if (stage == 2) {
+        NSDictionary *slice = j[@"gs_slice"];
+        NSString *comp = [slice isKindOfClass:[NSDictionary class]] ? slice[@"comp"] : nil;
+        int loc = [slice isKindOfClass:[NSDictionary class]] ? [slice[@"loc"] intValue] : -1;
+        if (!route_a && [j[@"chain"] isEqual:@DMSH_CHAIN] && loc >= 0 && loc < 32 &&
+            [comp isKindOfClass:[NSString class]] && comp.length == 1 && strchr("xyzw", comp.UTF8String[0])) {
+            NvShader *o = [NvShader new]; o->stage = 2; o->lay_loc = -1;
+            o->gs_loc = loc; o->gs_comp = comp.UTF8String[0]; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+            return o;
+        }
+        MLOG("【红】geometry %s 不是已核验的切片写入器，拒绝执行", pc.UTF8String);
+        return nil;
+    }
+    if (layer && (route_a || ![j[@"entry_layer"] isKindOfClass:[NSString class]])) return nil;
     id<MTLLibrary> lib = lib_from_file(lp, &e);
     if (!lib || ![j isKindOfClass:[NSDictionary class]]) { MLOG("【红】加载着色器失败 %s：%s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "无反射 json"); return nil; }
     if (route_a && (![j[@"shader_sha256"] isEqual:pc] ||
@@ -3134,12 +3183,41 @@ static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected) {
     }
     if (!route_a && ![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("【红】着色器 %s 的翻译链版本 %s 与本宿主期望的 %s 不符", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     NvShader *o = [NvShader new];
+    o->gs_loc = o->lay_loc = -1;
+    NSDictionary *from = j[@"layer_from"];
+    if (stage == 0 && [from isKindOfClass:[NSDictionary class]]) {
+        o->lay_loc = [from[@"loc"] intValue];
+        NSString *comp = from[@"comp"];
+        if ([comp isKindOfClass:[NSString class]] && comp.length == 1) o->lay_comp = comp.UTF8String[0];
+    }
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("【红】着色器 %s 反射转换失败：%s", pc.UTF8String, err); return nil; }
     if (rt_range_on()) o->range_ro=rt_range_bindings_ro(j);
     o->assumed_facts = route_a ? @{@"summary": j[@"facts_summary"]} : nil;
     o->facts_sha = route_a ? [j[@"facts_sha256"] copy] : nil;
-    o->fn = [lib newFunctionWithName:j[@"entry"]]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+    NSString *entry = layer ? j[@"entry_layer"] : j[@"entry"];
+    o->fn = [lib newFunctionWithName:entry]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+    if (!o->fn) { MLOG("【红】着色器 %s 无入口 %s", pc.UTF8String, entry.UTF8String); return nil; }
+    if (stage == 0) o->layer_out = layer || (t_lib_layer && !j[@"entry_layer"]);
+    // Keep the external classic-Metal nvn_refl ABI unchanged.
+    NSDictionary *raster = j[@"raster"];
+    o->color_known = [raster isKindOfClass:[NSDictionary class]] && [raster[@"colors"] isKindOfClass:[NSArray class]];
+    if (stage == 1 && j[@"entry_u"]) {
+        o->fn_u = [lib newFunctionWithName:j[@"entry_u"]];
+        if (!o->fn_u) MLOG("【红】着色器 %s 无整数输出入口 %s", pc.UTF8String, [j[@"entry_u"] UTF8String]);
+    }
+    if (stage == 1 && j[@"entry_m"]) {
+        o->fn_m = [lib newFunctionWithName:j[@"entry_m"]];
+        o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
+        if (!o->fn_m) MLOG("【红】着色器 %s 无混合整数输出入口 %s", pc.UTF8String, [j[@"entry_m"] UTF8String]);
+    }
+    if (o->fn.functionConstantsDictionary.count) {
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        id<MTLFunction> f = [lib newFunctionWithName:entry constantValues:cv error:&e];
+        if (f) o->fn = f; else MLOG("【红】着色器 %s 函数常量特化失败：%s", pc.UTF8String, e.localizedDescription.UTF8String);
+        if (o->fn_u) o->fn_u = [lib newFunctionWithName:j[@"entry_u"] constantValues:cv error:&e];
+        if (o->fn_m) o->fn_m = [lib newFunctionWithName:j[@"entry_m"] constantValues:cv error:&e];
+    }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
@@ -3196,7 +3274,7 @@ static NvShader *shader_get(NSString *pc, int stage, NSDictionary *probe,
         ? [NSString stringWithFormat:@"%@:%d:%@", pc, stage, reflection[@"cache_key"]] : pc;
     NvShader *o = g_shcache[cache_key];
     if (o) return o;
-    uint64_t bt = bp_now(); o = shader_load(pc, stage, reflection);
+    uint64_t bt = bp_now(); o = shader_load(pc, stage, reflection, 0);
     if (!o) return nil;
     g_shcache[cache_key] = o; atomic_fetch_add(&g_shcache_n, 1);
     if (!route_a) {
@@ -3205,6 +3283,21 @@ static NvShader *shader_get(NSString *pc, int stage, NSDictionary *probe,
     }
     g_bp_lib_n++; g_bp_lib_ns += bp_now() - bt;
     return o;
+}
+static NvShader *shader_get_layer(NvShader *vs) {
+    if (ot2_route_a_shader_mode()) return nil;
+    NSString *pc = @(vs->key), *key = [pc stringByAppendingString:@"#l"];
+    NvShader *o = g_shcache[key];
+    if (!o && (o = shader_load(pc, 0, nil, 1))) g_shcache[key] = o;
+    return o;
+}
+static void prog_fold_gs(NvProg *o) {
+    NvShader *g = o->sh[2], *v = o->sh[0];
+    if (!g || g->fn || !v) return;
+    NvShader *layer = v->lay_loc == g->gs_loc && v->lay_comp == g->gs_comp ? shader_get_layer(v) : nil;
+    if (!layer) return;
+    o->sh[0] = layer; o->sh[2] = nil; o->gs_unresolved = 0;
+    static int once; if (!once++) MLOG("切片geometry %s → VS %s 层入口（layered pass）", g->key, v->key);
 }
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提交线程调用 | Called only on the submit thread
     prog_t *p = (prog_t *)cp;
@@ -3254,13 +3347,16 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
                 if (o->sh[st] && o->sh[st] != sh) MLOG("【红】Route-A程序阶段冲突：%s stage=%s", sass.UTF8String, route_a_stage_name(st).UTF8String);
                 else o->sh[st] = sh;
             }
+            if (st == 2) o->gs_unresolved = 1;
         }
+        prog_fold_gs(o);
         if (p->serial && !have) serial_put(p->serial, o);
         lpr = o;
         return o;
     }
     shmap_load();
     for (unsigned i = 0; i < p->nstage; i++) {
+        if (p->composite && p->stage_hint[i] == 2) o->gs_unresolved = 1;
         uint32_t code_bytes = 0, own = 0x880;
         const NVNshaderData *shader = &p->sd[i];
         if (!shader->control) continue;
@@ -3283,7 +3379,9 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
         int st = stage_of(zh);
         NvShader *loaded = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st, nil, nil, 0, nil) : nil;
         if (loaded) o->sh[st] = loaded; else MLOG("【红】着色器 %s（%s）加载失败：先跑 dm/gfx/tools/dmsh_build.py 出包", k.UTF8String, zh.UTF8String);
+        if (st == 2) o->gs_unresolved = 1;
     }
+    prog_fold_gs(o);
     if (p->serial) serial_put(p->serial, o);
     return o;
 }
@@ -4739,6 +4837,50 @@ static void nvn_5ffd_bind_c1_out(id<MTLRenderCommandEncoder> en, const NvShader 
     if (nlog++ < 4) MLOG("[5ffd-diag] c1 直出绑定 gpu=%#llx（默认 zero_bank；配位 4 为活 Data 后缀 c1）", (unsigned long long)gpu);
 }
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
+// nxnative@0f99c35: preserve integer bit patterns at integer color attachments.
+static int pf_int_kind(MTLPixelFormat f) {
+    switch (f) {
+        case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint:
+        case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGB10A2Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint: return 1;
+        case MTLPixelFormatR8Sint: case MTLPixelFormatR16Sint: case MTLPixelFormatR32Sint: case MTLPixelFormatRG8Sint: case MTLPixelFormatRG16Sint: case MTLPixelFormatRG32Sint:
+        case MTLPixelFormatRGBA8Sint: case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA32Sint: return 2;
+        default: return 0;
+    }
+}
+static int pso_all_uint(const pso_key *k, NvShader *fs, int merged) {
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!k->cfmt[i]) continue;
+        int l = merged ? k->lmap[i] : i;
+        if (l == 0xff || (fs->color_known && !(fs->rf.color_mask >> l & 1))) continue;
+        if (pf_int_kind((MTLPixelFormat)k->cfmt[i]) != 1) return 0;
+        n++;
+    }
+    return n > 0;
+}
+static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
+    int ints = 0, floats = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!k->cfmt[i]) continue;
+        int l = merged ? k->lmap[i] : i;
+        if (l == 0xff || (fs->color_known && !(fs->rf.color_mask >> l & 1))) continue;
+        int u = pf_int_kind((MTLPixelFormat)k->cfmt[i]) == 1;
+        if (u != (l < 8 && (fs->mask_m >> l & 1))) return 0;
+        if (u) ints++; else floats++;
+    }
+    return ints && floats;
+}
+static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, size_t n) {
+    if (!fs || strlen(fs->key) < 16) return "";
+    int o = snprintf(b, n, "; if its outputs are integers, add to shader_facts_manual.tsv: %.16s\t{\"fout\":{", fs->key), any = 0;
+    for (int c = 0; c < 8; c++) {
+        int kind = !fs->color_known || fs->rf.color_mask >> c & 1 ? pf_int_kind((MTLPixelFormat)cfmt[c]) : 0;
+        if (kind && o < (int)n) o += snprintf(b + o, n - o, "%s\"%d\":\"%s\"", any++ ? "," : "", c, kind == 1 ? "uint" : "sint");
+    }
+    if (!any) return "";
+    if (o < (int)n) snprintf(b + o, n - o, "}}");
+    return b;
+}
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;
@@ -4761,6 +4903,11 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (nvn_5ffd_diag_mode() & 8) { if (nvn_5ffd_diag_init()) d.fragmentFunction = g_5ffd_diag.fn_c1; }
         else if (nvn_5ffd_diag_mode() & 2) { if (nvn_5ffd_diag_init()) d.fragmentFunction = g_5ffd_diag.fn_sample; }
     }
+    if (fs && !fsfn && d.fragmentFunction == fs->fn) {
+        if (fs->fn_u && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;
+        else if (fs->fn_m && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;
+    }
+    if (vs->layer_out) d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
     d.rasterSampleCount = k->samples ? k->samples : 1;
     d.alphaToCoverageEnabled = k->a2c;
     for (int i = 0; i < 8; i++) {
@@ -4769,8 +4916,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         c.pixelFormat = (MTLPixelFormat)k->cfmt[i];
         int l = merged ? k->lmap[i] : i;
         uint32_t m = l == 0xff ? 0 : (k->chmask >> (4 * l)) & 0xf;
+        int unwritten = fs && fs->color_known && !fsfn && l != 0xff && !(fs->rf.color_mask >> l & 1);
+        if (unwritten) m = 0;
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
-        if (l != 0xff && k->blend_en >> l & 1) {
+        if (l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {
             c.blendingEnabled = YES;
             c.sourceRGBBlendFactor = bfac(k->blend[l].src_rgb); c.destinationRGBBlendFactor = bfac(k->blend[l].dst_rgb);
             c.sourceAlphaBlendFactor = bfac(k->blend[l].src_a); c.destinationAlphaBlendFactor = bfac(k->blend[l].dst_a);
@@ -4867,7 +5016,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
         if (ps && g_draw_trace) g_draw_trace->pipeline = "built";
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-    if (!ps) { if (g_draw_trace) g_draw_trace->pipeline = "build-failed"; MLOG("【红】建渲染管线失败：%s", e.localizedDescription.UTF8String); return nil; }
+    if (!ps) { char hint[320]; if (g_draw_trace) g_draw_trace->pipeline = "build-failed"; MLOG("【红】建渲染管线失败 FS=%s：%s%s", fs ? fs->key : "-", e.localizedDescription.UTF8String, pso_fout_hint(fs, k.cfmt, hint, sizeof hint)); return nil; }
     pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
     if (ot2_nvn_hle_enabled() &&
         route_a_link_add(&g_route_a_link_psos, [NSString stringWithUTF8String:shex]))
@@ -4883,7 +5032,7 @@ static NSString *warm_key(const char *s, size_t n) {
 }
 static NvShader *warm_shader(NSMutableDictionary<NSString *, NvShader *> *dict, NSString *key, int stage) {
     NvShader *sh = dict[key];
-    if (!sh) { sh = shader_load(key, stage, nil); if (sh) dict[key] = sh; }
+    if (!sh) { sh = shader_load(key, stage, nil, 0); if (sh) dict[key] = sh; }
     return sh;
 }
 static void warm_enqueue(WarmItem *item) {
@@ -6780,6 +6929,11 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
         return;
     }
     if (!pr) { trace.result = "program-unresolved"; return; }
+    if (pr->gs_unresolved || pr->sh[2]) {
+        trace.result = "unsupported-geometry";
+        static int n; if (n++ < 4) MLOG("【红】未能折叠的geometry，跳过绘制（fail-closed）");
+        return;
+    }
     if (g_ruler_truth == 0) {   // 尺子负对照（DM_NVN_RULER_NEG=<片元键>）：被测模式下丢掉该着色器的绘制，尺子必须报不等价 | Ruler negative control (DM_NVN_RULER_NEG=<fragment key>): in the mode under test drop this shader's draws, and the ruler must report non-equivalence
         static const char *neg; static int ng = -1; if (ng < 0) { neg = getenv("DM_NVN_RULER_NEG"); ng = neg && *neg; }
         if (ng && pr) for (int st = 0; st < 5; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (sh && sh->stage == 1 && !strncmp(sh->key, neg, strlen(neg))) { static int once; if (!once++) MLOG("DM_NVN_RULER_NEG：被测模式丢弃着色器 %s 的绘制", sh->key); return; } }
@@ -6885,7 +7039,10 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
     int need = g_enc || !tb_sub(TB_DS) ? 3 : pass_ds_need(), mode = defer_q_draw ? 0 : need == 0 ? 2 : need == 2 ? 3 : need == 1 ? 4 : 0;   // 2 都不挂 3 只挂模板 4 只挂深度 | 2 attach neither, 3 attach stencil only, 4 attach depth only
     int skip_d = mode != 0;
     if (!g_enc) { g_fd_dw = dw; g_fd_di = di; }
+    g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
+    if (g_enc && g_pass.layered != g_rp_layered) rp_end();
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
+    g_rp_layered = 0;
     g_fd_dw = NULL; g_fd_di = NULL;
     if (!en) { trace.result = "no-render-encoder"; return; }
     if (defer_q_draw) defer_replay();

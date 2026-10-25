@@ -12,6 +12,19 @@ annotations. This trial selects that Route-A tree because it contains locally
 verified Octopath Traveler II object-layout fixes; nxnative's host, rewriter,
 profile handling and offline shader pipeline remain in use.
 
+The integer fragment-output entry loading, render-target-aware selection and
+failure hints in `dm/host/m3_routea_nvn_mtl.m` are ported from
+`nxnative/dm/gfx/nvn/nvn_mtl.m` at
+`0f99c353d3abc334c39855d691afdfab40f4639f` (lines 2914, 3099–3106,
+4183–4214, 4232–4233, 4343–4353 and 7602–7610).
+Copyright (c) 2026 seedds. These portions use the same MIT license text below
+(also preserved in this repository's `LICENSE`), with this copyright notice.
+
+The slice-only geometry-to-vertex-layer folding and layered render-pass setup
+in that file are also ported from nxnative at the same commit (lines 2785–2795,
+2918, 3034, 3053–3077, 3088–3090, 3165–3183, 4234 and 6921–6924).
+Copyright (c) 2026 seedds; MIT. This does not add a general geometry backend.
+
 Distributors of this source or a resulting binary must preserve the following
 notice.
 
