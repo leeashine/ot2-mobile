@@ -23,7 +23,7 @@ ifneq ($(strip $(M3_GFX_DIR)),)
 CFLAGS += -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0
 M3_NVN_SRC = $(M3_GFX_DIR)/nvn/hle_nvn.c m3_routea_nvn_mtl.m \
 	$(M3_GFX_DIR)/nvn/nvn_tex.c $(M3_GFX_DIR)/nvn/nvn_dirty.c \
-	$(M3_GFX_DIR)/nvn/nvn_refl.m $(M3_GFX_DIR)/tex/nvn_fmt_mtl.c \
+	m3_routea_nvn_refl.m $(M3_GFX_DIR)/tex/nvn_fmt_mtl.c \
 	$(M3_GFX_DIR)/tex/nvn_deswizzle.c $(M3_GFX_DIR)/tex/nvn_deswizzle_gpu.m \
 	$(M3_GFX_DIR)/tex/nvn_bcdec.c $(M3_GFX_DIR)/nvn/nvn_thunks.S \
 	$(M3_GFX_DIR)/nvn/nvn_entry.S
