@@ -26,8 +26,8 @@
 #ifndef _DARWIN_C_SOURCE
 #define _DARWIN_C_SOURCE
 #endif
+#include "gthread.h"
 #include "hle.h"
-#include "../gthread.h"
 
 #include "nvn/../dm.h"
 #include "nvn_protos.h"
@@ -467,8 +467,17 @@ static int nvn_shader_ensure_dir(const char *path) {
     return !stat(path, &st) && S_ISDIR(st.st_mode);
 }
 
+
 static void nvn_shader_capture_prefix(uint64_t address, const void *control, uint64_t serial, int index,
                                       uintptr_t program_address, int program_shader_count) {
+    const char *work_root = getenv("OT2_WORK");
+    static _Atomic int missing_work_warned;
+    if (!work_root || !*work_root) {
+        if (!atomic_exchange(&missing_work_warned, 1))
+            LOG("【红】OT2_WORK 未设置，跳过 NVN shader pair 捕获");
+        return;
+    }
+
     enum { CONTROL_MIN_BYTES = 0x708, CONTROL_CAPTURE_BYTES = 0x880 };
     uintptr_t pool_base;
     size_t pool_remaining;
@@ -521,17 +530,23 @@ static void nvn_shader_capture_prefix(uint64_t address, const void *control, uin
         free(bytes);
         return;
     }
-    const char *home = getenv("HOME");
     char work[PATH_MAX], shaders[PATH_MAX], pending[PATH_MAX], stem[96];
     char bin[PATH_MAX], control_bin[PATH_MAX], meta[PATH_MAX];
-    if (!home || snprintf(work, sizeof work, "%s/local-work", home) >= (int)sizeof work ||
-        snprintf(shaders, sizeof shaders, "%s/shaders", work) >= (int)sizeof shaders ||
-        snprintf(pending, sizeof pending, "%s/pending", shaders) >= (int)sizeof pending ||
-        snprintf(stem, sizeof stem, "%d-%016llx-%d", getpid(), (unsigned long long)serial, index) >= (int)sizeof stem ||
-        snprintf(bin, sizeof bin, "%s/%s.prefix.bin", pending, stem) >= (int)sizeof bin ||
-        snprintf(control_bin, sizeof control_bin, "%s/%s.control.bin", pending, stem) >= (int)sizeof control_bin ||
-        snprintf(meta, sizeof meta, "%s/%s.meta.json", pending, stem) >= (int)sizeof meta) {
-        LOG("【红】shader pair 未捕获：HOME 或路径无效");
+    int work_len = snprintf(work, sizeof work, "%s", work_root);
+    int shaders_len = snprintf(shaders, sizeof shaders, "%s/shaders", work);
+    int pending_len = snprintf(pending, sizeof pending, "%s/pending", shaders);
+    int stem_len = snprintf(stem, sizeof stem, "%d-%016llx-%d", getpid(), (unsigned long long)serial, index);
+    int bin_len = snprintf(bin, sizeof bin, "%s/%s.prefix.bin", pending, stem);
+    int control_len = snprintf(control_bin, sizeof control_bin, "%s/%s.control.bin", pending, stem);
+    int meta_len = snprintf(meta, sizeof meta, "%s/%s.meta.json", pending, stem);
+    if (work_len < 0 || (size_t)work_len >= sizeof work ||
+        shaders_len < 0 || (size_t)shaders_len >= sizeof shaders ||
+        pending_len < 0 || (size_t)pending_len >= sizeof pending ||
+        stem_len < 0 || (size_t)stem_len >= sizeof stem ||
+        bin_len < 0 || (size_t)bin_len >= sizeof bin ||
+        control_len < 0 || (size_t)control_len >= sizeof control_bin ||
+        meta_len < 0 || (size_t)meta_len >= sizeof meta) {
+        LOG("【红】shader pair 未捕获：OT2_WORK 或路径无效");
         free(bytes);
         return;
     }

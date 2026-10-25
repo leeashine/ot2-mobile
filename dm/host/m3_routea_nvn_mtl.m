@@ -2888,16 +2888,23 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
     return [g_dev newLibraryWithData:d error:err];
 }
-static NSString *route_a_shader_cache_dir(void) {
+static NSString *route_a_work_dir(void) {
     static NSString *dir;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        dir = [[NSHomeDirectory() stringByAppendingPathComponent:@"local-work"] stringByAppendingPathComponent:@"shader-cache"];
+        const char *root = getenv("OT2_WORK");
+        if (root && *root) dir = [NSString stringWithUTF8String:root];
+        if (!dir) MLOG("【红】OT2_WORK 未设置或不是有效 UTF-8 路径，Route-A 诊断输出已关闭");
     });
     return dir;
 }
+static NSString *route_a_shader_cache_dir(void) {
+    NSString *work = route_a_work_dir();
+    return work ? [work stringByAppendingPathComponent:@"shader-cache"] : nil;
+}
 static NSString *route_a_pending_shader_dir(void) {
-    return [[NSHomeDirectory() stringByAppendingPathComponent:@"local-work/shaders"] stringByAppendingPathComponent:@"pending"];
+    NSString *work = route_a_work_dir();
+    return work ? [[work stringByAppendingPathComponent:@"shaders"] stringByAppendingPathComponent:@"pending"] : nil;
 }
 static NSString *route_a_sha256_string(const void *bytes, size_t len) {
     if (!bytes || !len) return nil;
@@ -2969,7 +2976,7 @@ static void route_a_probe_index_init(void) {
             NSMutableSet *ambiguous = [NSMutableSet set];
             NSError *e = nil;
             NSString *dir = route_a_pending_shader_dir();
-            NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:&e];
+            NSArray<NSString *> *names = dir ? [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:&e] : nil;
             for (NSString *name in names) {
                 if (![name hasSuffix:@".probe.json"]) continue;
                 NSData *data = [NSData dataWithContentsOfFile:[[dir stringByAppendingPathComponent:name] stringByStandardizingPath]];
@@ -3035,7 +3042,7 @@ static void route_a_cache_index_init(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSString *dir = route_a_shader_cache_dir();
-        NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil];
+        NSArray<NSString *> *names = dir ? [[NSFileManager defaultManager] contentsOfDirectoryAtPath:dir error:nil] : nil;
         NSMutableDictionary *index = [NSMutableDictionary dictionary];
         NSUInteger count = 0;
         for (NSString *name in names) {
@@ -3157,7 +3164,7 @@ static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected, in
     NSDictionary *j = nil;
     if (route_a) {
         j = selected;
-        if (!j) { MLOG("【红】Route-A 当前 shader/stage 没有 facts 匹配的 metallib：shader=%s stage=%s", pc.UTF8String, route_a_stage_code(stage).UTF8String ?: "unknown"); return nil; }
+        if (!dir || !j) { MLOG("【红】Route-A 当前 shader/stage 没有可用的 facts metallib：shader=%s stage=%s", pc.UTF8String, route_a_stage_code(stage).UTF8String ?: "unknown"); return nil; }
         lp = [dir stringByAppendingPathComponent:[j[@"cache_key"] stringByAppendingString:@".metallib"]];
     } else {
         lp = [NSString stringWithFormat:@"%@/%@.metallib", dir, pc];
@@ -4350,8 +4357,9 @@ dispatch_once(&once, ^{
             NSString *unresolved_component = safe_control && route_a_valid_sha256(safe_control)
                 ? safe_control : @"no-control";
             NSString *component = safe_sass ?: [@"unresolved" stringByAppendingPathComponent:unresolved_component];
-            NSString *base = [[NSHomeDirectory() stringByAppendingPathComponent:@"local-work/shaders"]
-                              stringByAppendingPathComponent:component];
+            NSString *work = route_a_work_dir();
+            if (!work) return;
+            NSString *base = [[work stringByAppendingPathComponent:@"shaders"] stringByAppendingPathComponent:component];
             if (![[NSFileManager defaultManager] createDirectoryAtPath:base
                                            withIntermediateDirectories:YES attributes:nil error:&e]) {
                 MLOG("【红】Route-A runtime facts目录创建失败：%s", e.localizedDescription.UTF8String ?: "unknown");
@@ -8093,7 +8101,9 @@ static void routea_capture_present(id<MTLTexture> src, uint64_t source_serial,
     if (!ot2_nvn_hle_enabled()) return;
     uint64_t every = routea_capture_every();
     if (!every || !ticket || ticket % every) return;
-    NSString *dir = [NSHomeDirectory() stringByAppendingPathComponent:@"local-work/route-a-frames"];
+    NSString *work = route_a_work_dir();
+    if (!work) return;
+    NSString *dir = [work stringByAppendingPathComponent:@"route-a-frames"];
     NSError *error = nil;
     NSFileManager *fm = [NSFileManager defaultManager];
     if (![fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&error] && ![fm fileExistsAtPath:dir]) {
