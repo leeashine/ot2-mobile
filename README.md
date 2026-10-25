@@ -4,6 +4,10 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
+## OT2 macOS 试运行
+
+实测30分钟以上无崩溃，仍有约0.4GB/小时缓慢增长，数小时长玩未测。该结论来自macOS上的酒馆交互及独立标题轮播样本，不代表全游戏或iPhone验证；配置、内存口径和已知限制见[试运行记录](docs/ot2-macos-trial.md#reservation-experiments-and-sdk-node-area-correction)。
+
 ## Acknowledgements
 
 This project is built on other people's work:

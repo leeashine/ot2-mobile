@@ -97,15 +97,27 @@ The runs exposed 21/17 distinct missing-map keys. All are covered by a new priva
 
 A local-only AudioUnit callback probe measured the PCM16 already produced by the game's output, without retaining raw samples. In the 55-second title smoke, output 0 at callback 4000 had 1,024/1,024 nonzero samples and peak amplitude 5,529/32,768; output 1 remained zero at those sampled callbacks. This proves nonzero game audio reaches the CoreAudio callback, not subjective listening quality or complete voice/effect support. An earlier probe forwarding method stalled AudioUnit initialization; that sample is excluded. The corrected probe reached the visible title screen and exited normally. The same smoke loaded all 1,835 map entries with zero missing-map warnings, but did not exercise every newly built shader.
 
-### Smaller reservation experiment (UE VA remains 3072 MiB)
+### Reservation experiments and SDK node-area correction
 
-| Alias / explicit reserve | Observed result |
-|---|---|
-| 4.375 / 5 GiB (`0x118000000` / `0x140000000`) | SDK `AllocateAddressRegion` returned `ResultOutOfVirtualAddressSpace` for the 3 GiB UE request; guest Break before the first frame. |
-| 5 / 5.625 GiB (`0x140000000` / `0x168000000`) | Private-header build reached tavern dialogue, control HUD and 11,160 presents; 376 seconds wall time, graceful exit 0. |
-| 5.5 / 6.125 GiB | Privately compiled but not run; the smaller tested case already passed. |
+| Alias / explicit reserve (GiB) | UE region (MiB) | SDK adjustment | Observed result |
+|---|---:|---|---|
+| 4.375 / 5 | 3072 | None | `AllocateAddressRegion` returned `ResultOutOfVirtualAddressSpace`; guest Break before the first frame. |
+| 5 / 5.625 | 3072 | None | Tavern dialogue/control HUD; 376 seconds and 11,160 presents, normal exit. This short sample did not establish long-run safety. |
+| 5.5 / 6.125 | 3072 | None | Privately compiled, not run. |
+| 4.375 / 5 | 4064 | Node area reduced only | Failed at 0.642 seconds: large regions still required 1-GiB placement alignment. |
+| 4.375 / 5 | 4064 | Node area reduced + 32-MiB large-region alignment | Tavern: 1,900.237 seconds without Break/fatal. Independent title carousel: 1,260.592 seconds without Break/OOM, but alias/arena still grew in steps; memory plateau is not established. |
 
-The smallest **tested passing** alias is 5 GiB; values between 4.375 and 5 GiB are untested. The passing sample's RSS peak was 2,673.6 MiB and kernel footprint peak was 3,173 MiB. Concurrent compilation, compression and differing run lengths prevent a causal physical-memory comparison. These are macOS results, not iPhone entitlement or memory-limit evidence. Following explicit approval, `game.tsv` now adopts `mem_reserve=0x168000000` and `mem_alias=0x140000000`, retaining `-SwitchVirtualAddressSpaceSize=3072`. The failed 4.375-GiB target remains recorded above; private comparison evidence stays under `small-va-trial/va-a5/`.
+`game.tsv` now selects the final row. For SDK build `5bcf525f24eb28658a8d67ac27800d9b`, `sdk_patches.py` applies the existing upstream strategy with original-instruction assertions: the node limit at `sdk+0x346190` and occupied length at `+0x34622c` become 62 MiB; the large-region alignment at `+0x34638c` becomes 32 MiB. Both offsets and the placement branch were checked against the local SDK. Keeping 1-GiB alignment after the two node cuts still left 768 MiB of placement slack on this Mac layout, so it did not fit the requested engine region.
+
+The UE arena cursor is a virtual-address high-water mark, not live allocation bytes: upstream `docs/agents/03-bringup.md` describes the same bump allocator plus size-class free lists. It need not fall after frees. Record alias page-bitmap totals, logical NVN pool ownership and the host malloc zone separately; pool storage overlaps the alias ledger. The zone-in-UsedMemory/budget candidate caused an earlier budget OOM and is withdrawn; OT2 keeps the previous accounting and leaves `mem_map_limit` off. The Fence hypothesis was not supported by the finalized-slot history and absence of waits on that slot; experimental acceptance code is archived locally, not proposed for commit.
+
+The earlier short sample's RSS/footprint peaks were 2,673.6/3,173 MiB; they are not a long-run or causal memory comparison. The new configuration is macOS-only evidence. iPhone VA availability, entitlements and jetsam limits remain unverified. Local manifests, logs, saves and screenshots stay under `memory-investigation/`, never in the repository.
+
+The 31-minute tavern sample ended on its timer, not natural game completion. During the last 600 seconds the alias ledger stayed at 1,504.109 MiB, arena address high-water at 1,798.062 MiB, and logical live NVN pools at 1,301.402 MiB; the UE host zone ranged from 1,265.170 to 1,265.963 MiB. RSS/footprint peaks were 2,659.344/2,858 MiB. This covers story, movement and NPC interaction inside the tavern, not the exterior village.
+
+The independent title-menu carousel used the same host and SDK binaries for 1,260.592 seconds, with only `f1000:A` to enter the menu. Six keyframes confirm changing backgrounds; no Break, fatal or OOM text was recorded. RSS/footprint peaks were 2,430/2,268 MiB. However, in the last 600 seconds alias pages grew 807.422→887.422 MiB, arena high-water 943.062→1,027.062 MiB, and overlapping logical NVN pools 755.777→835.777 MiB, while the host zone stayed within 1,116.373–1,116.393 MiB. Steps continued about every 160–170 seconds. On 2026-10-26 the release owner accepted the 31-minute tavern and independent 21-minute title-carousel samples as the initial memory release gate: measured growth is now roughly 0.4 GB/hour, not a plateau or a guarantee of multi-hour play. Longer runs remain untested and do not block this initial release; no iPhone memory claim follows.
+
+Bring-up discipline: when one subproblem produces no substantive convergence for an hour, first inspect upstream nxnative code and `docs/agents/`, then d2r-mobile and same-engine precedents. Record the inspected paths and findings in the progress notification before continuing local reverse engineering.
 
 ### Diagnostic disk limits
 
