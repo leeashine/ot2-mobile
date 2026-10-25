@@ -60,6 +60,7 @@ static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i+
 
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
 void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = RESERVE; }
+void svc_alias_range(uint8_t **base, size_t *size) { *base = g_alias; *size = g_alias_cap; }
 
 enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=4, I_HeapSize=5,
        I_TotalMem=6, I_UsedMem=7, I_DebuggerAttached=8, I_ResourceLimit=9, I_IdleTick=10, I_RandomEntropy=11,
@@ -108,6 +109,25 @@ static int64_t alias_unmapped(uint64_t off, uint64_t n) {
 }
 static _Atomic int64_t g_alias_mapped;   // bytes mapped in the alias region (page bitmap)
 static pthread_mutex_t g_phys_mu = PTHREAD_MUTEX_INITIALIZER;   // mem_map_limit: the pool check and the map it allows are one step
+static struct {
+    _Atomic uint64_t map_calls, map_requested, map_new, map_refused;
+    _Atomic uint64_t unmap_calls, unmap_requested, unmap_released;
+} g_vm_diag;
+
+void svc_memory_report(void) {
+    if (!g_flag.dbg) return;
+    LOG("[DEBUG-UE-MEM] alias_mapped=%lld application_pool=%llu map_limit=%d",
+        (long long)atomic_load(&g_alias_mapped), (unsigned long long)APP_POOL,
+        DM_GAME_MEM_MAP_LIMIT);
+    LOG("[DEBUG-UE-MEM] vm_map_calls=%llu vm_map_requested=%llu vm_map_new=%llu vm_map_refused=%llu vm_unmap_calls=%llu vm_unmap_requested=%llu vm_unmap_released=%llu",
+        (unsigned long long)atomic_load(&g_vm_diag.map_calls),
+        (unsigned long long)atomic_load(&g_vm_diag.map_requested),
+        (unsigned long long)atomic_load(&g_vm_diag.map_new),
+        (unsigned long long)atomic_load(&g_vm_diag.map_refused),
+        (unsigned long long)atomic_load(&g_vm_diag.unmap_calls),
+        (unsigned long long)atomic_load(&g_vm_diag.unmap_requested),
+        (unsigned long long)atomic_load(&g_vm_diag.unmap_released));
+}
 
 // Diagnostic DM_ALIAS_WINDOWS=<window MB>: every 30 s, the mapped memory of each window of that size in the alias region (windows aligned to the size in absolute addresses, counted from the page
 // bitmap; windows with nothing mapped are left out). For sizing an allocator that reserves fixed, aligned windows and commits pages from each window's start: Unreal's FMallocBinned3 takes
@@ -227,6 +247,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
         uint8_t *a = (uint8_t *)regs[0]; size_t size = regs[1];
         if (a < g_alias || a + size > g_alias + g_alias_cap) { LOG("SVC %#x outside the alias region %p+%#zx", num, a, size); regs[0] = 0xD401; return 0; }
+        if (g_flag.dbg) {
+            atomic_fetch_add(num == 0x2C ? &g_vm_diag.map_calls : &g_vm_diag.unmap_calls, 1);
+            atomic_fetch_add(num == 0x2C ? &g_vm_diag.map_requested : &g_vm_diag.unmap_requested, size);
+        }
         // Profile mem_map_limit: a map that would take the process past the application pool fails with ResultLimitReached, as on Horizon (the pool less the used memory GetInfo reports).
         // Pokémon Legends: Z-A's nninitStartup allocates and frees everything allocatable (pool − 64 MB, mapped at the top of its StandardAllocator region: 12 GB, 4 GB after the cut in its patches.py); the SDK keeps the freed pages mapped
         // and maps new ones for later allocations, until a map fails: then it unmaps the cached block and retries (measured on the Mac: the refused 4 MB map at +0x43e2c000 was followed by
@@ -234,8 +258,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // Off by default: Ace Attorney Investigations Collection maps a little more than the 1 GB pool its profile reports
         if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) {
             pthread_mutex_lock(&g_phys_mu);
-            int64_t need = alias_unmapped((uint64_t)(a - g_alias), size) << 12, room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);   // the pool less the used memory GetInfo reports
+            int64_t need = alias_unmapped((uint64_t)(a - g_alias), size) << 12;
+            int64_t room = (int64_t)APP_POOL - (int64_t)(g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes()) - atomic_load(&g_alias_mapped);
             if (need > room) {
+                if (g_flag.dbg) atomic_fetch_add(&g_vm_diag.map_refused, 1);
                 pthread_mutex_unlock(&g_phys_mu);
                 static _Atomic int nref; if (atomic_fetch_add(&nref, 1) < 8) LOG("[mem] MapPhysicalMemory +%#zx refused: %.2f GB mapped, the application pool is full (ResultLimitReached, the SDK frees cached pages and retries)",
                                                                        size, atomic_load(&g_alias_mapped) / 1073741824.0);
@@ -258,6 +284,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         // Total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing. Counted with a page bitmap, only pages whose state really changed --
         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
         { int64_t d = alias_pages((uint64_t)(a - g_alias), size, num == 0x2C) << 12, before = atomic_fetch_add(&g_alias_mapped, d), after = before + d;
+          if (g_flag.dbg) {
+              if (num == 0x2C) atomic_fetch_add(&g_vm_diag.map_new, (uint64_t)d);
+              else atomic_fetch_add(&g_vm_diag.unmap_released, (uint64_t)-d);
+          }
           if (DM_GAME_MEM_MAP_LIMIT && num == 0x2C) pthread_mutex_unlock(&g_phys_mu);
           if (before >> 28 != after >> 28) LOG("[mem] alias region mapped %.2f GB (application pool %.2f GB)", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
@@ -267,6 +297,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         module_t *mm = module_of((void *)regs[30]);
         static int nb;
         LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+        if (g_flag.dbg) { void dm_ue_memory_report(void); svc_memory_report(); dm_ue_memory_report(); }
         dm_backtrace(regs[29]);
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
@@ -287,7 +318,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
         case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + DM_GAME_MEM_USED + big_bss_bytes();   // profile mem_used, 64 MB unless the game needs more (see mem_used in dm/games/README.md)
-                                             // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory is the pool less this)
+                                             // with mem_map_limit, the pages mapped in the alias region count too, as on Horizon (the limit in MapPhysicalMemory).
                                              if (DM_GAME_MEM_MAP_LIMIT) v += (uint64_t)atomic_load(&g_alias_mapped); break;
         // the system resource the NPDM declares (profile sys_resource; 32 MB without the key). The SDK's IsVirtualAddressMemoryEnabled is "total != 0": Big Brain Academy's nninitStartup
         // asks StandardAllocator for 60 GB of virtual address memory when it is, and sets a heap only when it is not (its NPDM declares none)

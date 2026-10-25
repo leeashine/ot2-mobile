@@ -1821,7 +1821,6 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb, int heap_
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
-void mtl_tex_release(tex_t *t) { if (t->serial) serial_del(t->serial); }
 
 // ---------- 渲染通道：SetRenderTargets 开新通道；通道里第一条命令之前的清除并进 load 动作 ----------
 // ---------- Render passes: SetRenderTargets opens a new pass; clears before the first command in the pass are folded into the load action ----------
@@ -3457,12 +3456,55 @@ static treg_t *g_treg; static int g_ntreg;
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview：采样器号 → MTLSamplerState（持有） | g_sview: sampler ID → MTLSamplerState (retained)
+// A CPU Finalize may precede playback of already-recorded commands. Cache
+// eviction waits for snapshot retirement and the last descriptor reference.
+// Both maps are protected by g_rmu; values are integer state/counts, not CF ids.
+static nvn_hmap g_texture_retired = {.klen = 8}, g_texture_descriptor_refs = {.klen = 8};
+static void texture_collect_locked(uint64_t serial) {
+    if ((uintptr_t)nvn_hm_get(&g_texture_retired, &serial) == 2 &&
+        !nvn_hm_get(&g_texture_descriptor_refs, &serial)) {
+        serial_del(serial);
+        nvn_hm_del(&g_texture_retired, &serial);
+    }
+}
+void mtl_tex_release(tex_t *t) {
+    if (!t->serial) return;
+    pthread_mutex_lock(&g_rmu);
+    nvn_hm_put(&g_texture_retired, &t->serial, (void *)(uintptr_t)(t->snap ? 1 : 2));
+    texture_collect_locked(t->serial);
+    pthread_mutex_unlock(&g_rmu);
+}
+void mtl_tex_snapshot_done(const tex_t *t) {
+    if (!t->serial) return;
+    pthread_mutex_lock(&g_rmu);
+    if (nvn_hm_get(&g_texture_retired, &t->serial)) {
+        nvn_hm_put(&g_texture_retired, &t->serial, (void *)(uintptr_t)2);
+        texture_collect_locked(t->serial);
+    }
+    pthread_mutex_unlock(&g_rmu);
+}
+static void texture_descriptor_ref_locked(uint64_t serial, int delta) {
+    if (!serial) return;
+    uintptr_t count = (uintptr_t)nvn_hm_get(&g_texture_descriptor_refs, &serial);
+    if (delta > 0) nvn_hm_put(&g_texture_descriptor_refs, &serial, (void *)(count + 1));
+    else if (count > 1) nvn_hm_put(&g_texture_descriptor_refs, &serial, (void *)(count - 1));
+    else {
+        nvn_hm_del(&g_texture_descriptor_refs, &serial);
+        texture_collect_locked(serial);
+    }
+}
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int id_ = tid; if (id_ < 0) return;
     pthread_mutex_lock(&g_rmu);
     if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_reg_gen++;
     if (g_treg[id_].view) { defer_obj_unref((__bridge id)g_treg[id_].view); CFRelease(g_treg[id_].view); g_treg[id_].view = NULL; g_treg[id_].view_id = g_treg[id_].view_rid = 0; }
+    uint64_t old_serial = g_treg[id_].ok ? g_treg[id_].t.serial : 0;
+    uint64_t new_serial = t ? t->serial : 0;
+    if (old_serial != new_serial) {
+        texture_descriptor_ref_locked(old_serial, -1);
+        texture_descriptor_ref_locked(new_serial, 1);
+    }
     g_treg[id_].ok = t != NULL; if (t) g_treg[id_].t = *t; g_treg[id_].has_v = v != NULL; if (v) g_treg[id_].v = *v;
     if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     pthread_mutex_unlock(&g_rmu);
@@ -3636,6 +3678,7 @@ static struct {
     float blend_color[4]; int64_t copy_stride, copy_image_stride;
 } S;
 static NSMutableDictionary<NSData *, NvBoundProgram *> *g_bound_program_cache;
+static _Atomic uint64_t g_bound_program_count;
 static void program_binding_apply(program_stage_binding bound[6], const p_bind_program *binding) {
     if (!binding) return;
     uint32_t mask = (uint32_t)binding->stages & 0x3fu;
@@ -3676,16 +3719,42 @@ static void program_binding_apply(program_stage_binding bound[6], const p_bind_p
                  (unsigned long long)program->serial, mask, program->nstage);
     }
 }
+// A snapshot address/serial is an object lifetime, not shader identity. Keeping
+// it in this process-wide cache retains new programs for identical shader bytes.
+// The small direct-mapped memo avoids rehashing immutable source serials.
+static int program_shader_digest(const prog_t *source, unsigned index, uint8_t out[32]) {
+    typedef struct { uint64_t serial; unsigned index; uint8_t digest[32]; } memo;
+    static memo hashes[128];
+    memo *hit = &hashes[(source->serial * 6 + index) % 128];
+    if (source->serial && hit->serial == source->serial && hit->index == index) {
+        memcpy(out, hit->digest, 32);
+        return 1;
+    }
+    const NVNshaderData *shader = &source->sd[index];
+    if (!shader->control || !shader->data) return 0;
+    uint32_t code_bytes = 0, own = 0;
+    memcpy(&code_bytes, (const uint8_t *)shader->control + 0x704, 4);
+    memcpy(&own, (const uint8_t *)shader->control + 0x20, 4);
+    if (!code_bytes || code_bytes >= (1u << 24)) return 0;
+    size_t control_bytes = own >= 0x760 && own < 0x880 ? own : 0x880;
+    CC_SHA256_CTX hash;
+    CC_SHA256_Init(&hash);
+    CC_SHA256_Update(&hash, shader->control, (CC_LONG)control_bytes);
+    CC_SHA256_Update(&hash, (const void *)(uintptr_t)shader->data, code_bytes);
+    CC_SHA256_Final(out, &hash);
+    *hit = (memo){.serial = source->serial, .index = index};
+    memcpy(hit->digest, out, 32);
+    return 1;
+}
 static const prog_t *program_binding_compose(const program_stage_binding bound[6]) {
-    uint64_t key[6][3] = {{0}};
+    uint8_t key[6][33] = {{0}};
     unsigned count = 0;
     for (unsigned stage = 0; stage < 6; stage++) {
         const prog_t *source = bound[stage].program;
         unsigned index = bound[stage].data_index;
-        if (!source || index >= source->nstage) continue;
-        key[stage][0] = (uint64_t)(uintptr_t)source;
-        key[stage][1] = source->serial;
-        key[stage][2] = (uint64_t)index + 1;
+        if (!source || index >= source->nstage || index >= 6) continue;
+        if (!program_shader_digest(source, index, key[stage] + 1)) return NULL;
+        key[stage][0] = 1;
         count++;
     }
     if (!count) return NULL;
@@ -3694,22 +3763,23 @@ static const prog_t *program_binding_compose(const program_stage_binding bound[6
     NvBoundProgram *entry = g_bound_program_cache[cache_key];
     if (!entry) {
         entry = [NvBoundProgram new];
-        prog_t *composite = &entry->program;
-        memset(composite, 0, sizeof *composite);
-        for (unsigned stage = 0; stage < 6; stage++) {
-            const prog_t *source = bound[stage].program;
-            unsigned index = bound[stage].data_index;
-            if (!source || index >= source->nstage) continue;
-            if (!composite->nstage) composite->magic = source->magic;
-            unsigned packed = composite->nstage++;
-            composite->sd[packed] = source->sd[index];
-            composite->stage_hint[packed] = (uint8_t)stage;
-        }
-        composite->serial = nvn_new_serial();
-        composite->composite = 1;
+        entry->program.serial = nvn_new_serial();
+        entry->program.composite = 1;
         g_bound_program_cache[cache_key] = entry;
+        atomic_fetch_add_explicit(&g_bound_program_count, 1, memory_order_relaxed);
     }
-    return &entry->program;
+    // Metadata addresses may have moved since an identical shader was cached.
+    // Refresh them on the replay thread; never retain a retired source snapshot.
+    prog_t *composite = &entry->program;
+    composite->nstage = 0;
+    for (unsigned stage = 0; stage < 6; stage++) if (key[stage][0]) {
+        const prog_t *source = bound[stage].program;
+        unsigned packed = composite->nstage++;
+        composite->magic = source->magic;
+        composite->sd[packed] = source->sd[bound[stage].data_index];
+        composite->stage_hint[packed] = (uint8_t)stage;
+    }
+    return composite;
 }
 static NSString *route_a_dimension(int target) {
     switch (target) {
@@ -7811,9 +7881,27 @@ void mtl_res_counts(uint32_t tick, const char *why) {
     mtl_res_count c;
     mtl_res_snapshot(&c);
     int dl, du; uint64_t da; nvn_dirty_slot_stats(&dl, &du, &da);
-    LOG("[nvn] 资源计数 拍 %u %s：渲染管线 %u 计算管线 %u 着色器 %u 深度模板 %u view非空 %u view槽 %u 存活贴图 %u 内存池存活 %u 内存池累计 %llu 采样器view非空 %u 脏页区间存活 %d 脏页区间累计 %llu c1缓冲 %u c1字节 %llu c1实际 %llu",
+    if (g_flag.dbg) {
+        unsigned programs = 0, packaged = 0, textures = 0;
+        uint64_t serial_min = UINT64_MAX, serial_max = 0;
+        pthread_mutex_lock(&g_smu);
+        for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) {
+            uint64_t serial; memcpy(&serial, g_by_serial.keys + (size_t)i * g_by_serial.klen, 8);
+            if (serial < serial_min) serial_min = serial;
+            if (serial > serial_max) serial_max = serial;
+            id object = (__bridge id)g_by_serial.vals[i];
+            if ([object isKindOfClass:[NvProg class]]) programs++;
+            else if ([object isKindOfClass:[NvPkg class]]) packaged++;
+            else textures++;
+        }
+        pthread_mutex_unlock(&g_smu);
+        LOG("[DEBUG-UE-MEM] serial_programs=%u serial_packaged=%u serial_textures=%u serial_min=%#llx serial_max=%#llx",
+            programs, packaged, textures, (unsigned long long)serial_min, (unsigned long long)serial_max);
+    }
+    LOG("[nvn] 资源计数 拍 %u %s：渲染管线 %u 计算管线 %u 着色器 %u 深度模板 %u view非空 %u view槽 %u 存活贴图 %u 内存池存活 %u 内存池累计 %llu 采样器view非空 %u 脏页区间存活 %d 脏页区间累计 %llu c1缓冲 %u c1字节 %llu c1实际 %llu 组合程序 %llu",
         tick, why, c.pso, c.cps, c.shaders, c.dss, c.view_nonnull, c.view_slots, c.live_tex,
-        c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data);
+        c.pools, (unsigned long long)c.pool_adds, c.sview_nonnull, dl, (unsigned long long)da, c.c1_bufs, (unsigned long long)c.c1_alloc, (unsigned long long)c.c1_data,
+        (unsigned long long)atomic_load_explicit(&g_bound_program_count, memory_order_relaxed));
 }
 // 按请求截图（DM_NVN_SHOT_UI 用）：dm_gfx_shot_at(k, 路径) = 在当前出图帧之后第 k 帧截图；每帧出图时检查到期请求
 // Screenshot on request (used by DM_NVN_SHOT_UI): dm_gfx_shot_at(k, path) = take a screenshot at the kth frame after the current present frame; due requests are checked at every frame's present

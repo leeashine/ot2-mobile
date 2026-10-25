@@ -598,6 +598,55 @@ static void nvn_shader_capture_prefix(uint64_t address, const void *control, uin
     free(bytes);
 }
 
+// Diagnostic logical ownership, not extra physical memory: alias-backed pools
+// overlap the SVC page ledger. Cumulative fields are sampled, not a global transaction.
+enum { POOL_DIAG_ALIAS, POOL_DIAG_OUTSIDE_ALIAS, POOL_DIAG_VIRTUAL, POOL_DIAG_NO_STORAGE, POOL_DIAG_COUNT };
+static struct {
+    _Atomic uint64_t init_calls, init_bytes, final_calls, final_bytes;
+} g_pool_diag[POOL_DIAG_COUNT];
+static _Atomic uint64_t g_pool_reinit_calls, g_pool_reinit_bytes, g_pool_invalid_finalize;
+static void debug_pool_event(const pool_t *p, int finalizing) {
+    if (!g_flag.dbg) return;
+    if (finalizing && p->magic != MAGIC('P', 'O', 'O', 'L')) {
+        atomic_fetch_add(&g_pool_invalid_finalize, 1);
+        return;
+    }
+    unsigned kind = POOL_DIAG_OUTSIDE_ALIAS;
+    if (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) kind = POOL_DIAG_VIRTUAL;
+    else if (!p->mem) kind = POOL_DIAG_NO_STORAGE;
+    else {
+        void svc_alias_range(uint8_t **, size_t *);
+        uint8_t *base; size_t capacity;
+        svc_alias_range(&base, &capacity);
+        uintptr_t a = (uintptr_t)p->mem, b = (uintptr_t)base;
+        if (base && a >= b && a - b <= capacity && p->size <= capacity - (a - b))
+            kind = POOL_DIAG_ALIAS;
+    }
+    if (finalizing) {
+        atomic_fetch_add(&g_pool_diag[kind].final_calls, 1);
+        atomic_fetch_add(&g_pool_diag[kind].final_bytes, p->size);
+    } else {
+        atomic_fetch_add(&g_pool_diag[kind].init_calls, 1);
+        atomic_fetch_add(&g_pool_diag[kind].init_bytes, p->size);
+    }
+}
+static void debug_pool_report(void) {
+    static const char *const names[] = {"alias", "outside_alias", "virtual", "no_storage"};
+    for (unsigned i = 0; i < POOL_DIAG_COUNT; i++) {
+        uint64_t initialized = atomic_load(&g_pool_diag[i].init_bytes);
+        uint64_t finalized = atomic_load(&g_pool_diag[i].final_bytes);
+        LOG("[DEBUG-UE-MEM] pool_kind=%s init_calls=%llu init_bytes=%llu finalize_calls=%llu finalize_bytes=%llu logical_live_bytes=%lld",
+            names[i], (unsigned long long)atomic_load(&g_pool_diag[i].init_calls),
+            (unsigned long long)initialized,
+            (unsigned long long)atomic_load(&g_pool_diag[i].final_calls),
+            (unsigned long long)finalized, (long long)((int64_t)initialized - (int64_t)finalized));
+    }
+    LOG("[DEBUG-UE-MEM] pool_reinit_calls=%llu pool_reinit_bytes=%llu pool_invalid_finalize=%llu",
+        (unsigned long long)atomic_load(&g_pool_reinit_calls),
+        (unsigned long long)atomic_load(&g_pool_reinit_bytes),
+        (unsigned long long)atomic_load(&g_pool_invalid_finalize));
+}
+
 NVN(nvnMemoryPoolBuilderSetDefaults, void, NVNmemoryPoolBuilder *b) { memset(b, 0, sizeof(pool_builder_t)); }
 NVN(nvnMemoryPoolBuilderSetDevice, void, NVNmemoryPoolBuilder *b, NVNdevice *d) { ((pool_builder_t *)b)->dev = d; }
 NVN(nvnMemoryPoolBuilderSetStorage, void, NVNmemoryPoolBuilder *b, void *m, size_t n) { ((pool_builder_t *)b)->mem = m; ((pool_builder_t *)b)->size = n; }
@@ -605,6 +654,10 @@ NVN(nvnMemoryPoolBuilderSetFlags, void, NVNmemoryPoolBuilder *b, int f) { ((pool
 NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBuilder *b) {
     const pool_builder_t *s = (const pool_builder_t *)b;
     pool_t *o = (pool_t *)p;
+    if (g_flag.dbg && o->magic == MAGIC('P', 'O', 'O', 'L')) {
+        atomic_fetch_add(&g_pool_reinit_calls, 1);
+        atomic_fetch_add(&g_pool_reinit_bytes, o->size);
+    }
     nvn_shader_pool_unregister(o);
     o->magic = MAGIC('P', 'O', 'O', 'L');
     o->flags = s->flags;
@@ -614,11 +667,13 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     if (!o->mem && !(o->flags & 0x200))
         LOG("【红】MemoryPoolInitialize 非虚拟池没有存储 flags=%#x size=%#llx", o->flags, o->size);
     nvn_shader_pool_register(o);
+    debug_pool_event(o, 0);
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
     return 1;
 }
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     pool_t *o = (pool_t *)p;
+    debug_pool_event(o, 1);
     nvn_shader_pool_unregister(o);
     if (o->mem) { nvn_dirty_remove_range(o->mem); mtl_pool_del(o->mem); }
     o->magic = 0;
@@ -729,11 +784,16 @@ static void snap_retire(const void *s) {   // 持 g_snap_mu | Holds g_snap_mu
     if (g_snap_nret == g_snap_capret) { g_snap_capret = g_snap_capret ? g_snap_capret * 2 : 256; g_snap_ret = realloc(g_snap_ret, g_snap_capret * sizeof *g_snap_ret); }
     g_snap_ret[g_snap_nret].s = (snap_slot *)s; g_snap_ret[g_snap_nret++].at = atomic_load(&g_x_subs);
 }
+void mtl_tex_snapshot_done(const tex_t *);
 static void snap_tick(uint64_t done) {   // 翻译线程每执行完一次提交：回收退役时已入队的提交都执行完、且又过了 SNAP_KEEP 次提交的副本 | Each time the translation thread finishes a submit: reclaim snapshots whose submits enqueued at retirement have all executed and that have passed SNAP_KEEP more submits
     pthread_mutex_lock(&g_snap_mu);
     g_snap_sub = done; size_t k = 0;
     for (size_t i = 0; i < g_snap_nret; i++) {
-        if (g_snap_ret[i].at + SNAP_KEEP <= g_snap_sub) { snap_slot *n = g_snap_ret[i].s; memset(n, 0, sizeof *n); n->next = g_snap_free; g_snap_free = n; g_snap_live--; }
+        if (g_snap_ret[i].at + SNAP_KEEP <= g_snap_sub) {
+            snap_slot *n = g_snap_ret[i].s;
+            if (n->t.magic == MAGIC('T', 'E', 'X', 0)) mtl_tex_snapshot_done(&n->t);
+            memset(n, 0, sizeof *n); n->next = g_snap_free; g_snap_free = n; g_snap_live--;
+        }
         else g_snap_ret[k++] = g_snap_ret[i];
     }
     g_snap_nret = k;
@@ -815,8 +875,9 @@ NVN(nvnTextureFinalize, void, NVNtexture *t) {
     tex_t *o = TX(t);
     nvn_storage_desc_destroy(tex_private_storage(t), o->serial);
     tex_private_storage_set(t, NULL);
+    mtl_tex_release(o);
     snap_drop(&o->snap, o->serial, offsetof(tex_t, serial));
-    mtl_tex_release(o); o->magic = 0;
+    o->magic = 0;
 }
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
@@ -959,9 +1020,59 @@ static void nvn_sync_trace_end(const char *api, uint64_t start, const char *resu
         api, ot2_gthread_current_handle(), (unsigned long long)tid,
         (unsigned long long)(now - start), result, (unsigned long long)value);
 }
+typedef struct {
+    const void *object;
+    uint64_t initialized, finalized;
+    unsigned has_init, has_finalize;
+} sync_history;
+static sync_history g_sync_history[4096];
+static pthread_mutex_t g_sync_history_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_sync_history_evictions;
+static _Atomic uint64_t g_command_fence_records, g_command_fence_scans, g_command_fence_failures;
+static sync_history *sync_history_slot(const void *object) {
+    uintptr_t key = (uintptr_t)object;
+    return &g_sync_history[((key >> 5) ^ (key >> 17)) & 4095];
+}
+static void sync_history_record(const void *object, int initialized) {
+    if (!nvn_sync_trace_on()) return;
+    uint64_t frame = dm_guest_frame();
+    pthread_mutex_lock(&g_sync_history_mu);
+    sync_history *h = sync_history_slot(object);
+    if (h->object != object) {
+        if (h->object) g_sync_history_evictions++;
+        *h = (sync_history){.object = object};
+    }
+    if (initialized) { h->initialized = frame; h->has_init = 1; }
+    else { h->finalized = frame; h->has_finalize = 1; }
+    pthread_mutex_unlock(&g_sync_history_mu);
+}
+static void command_fence_observe(const sync_t *s, int valid) {
+    if (!nvn_sync_trace_on()) return;
+    uint64_t scans = atomic_fetch_add(&g_command_fence_scans, 1) + 1;
+    uint64_t failed = atomic_load(&g_command_fence_failures);
+    if (!valid) failed = atomic_fetch_add(&g_command_fence_failures, 1) + 1;
+    if (scans > 12 && scans % 300 && (valid || (failed > 12 && failed % 300))) return;
+    sync_t fields = {0}; vm_size_t got = 0;
+    int readable = s && !vm_read_overwrite(mach_task_self(), (vm_address_t)s, sizeof fields, (vm_address_t)&fields, &got) && got == sizeof fields;
+    pthread_mutex_lock(&g_sync_history_mu);
+    sync_history *entry = sync_history_slot(s), h = {0};
+    if (entry->object == s) h = *entry;
+    uint64_t evictions = g_sync_history_evictions;
+    pthread_mutex_unlock(&g_sync_history_mu);
+    LOG("[DEBUG-RA-FENCE] ptr=%p readable=%d magic=%#x fenced=%u fence=%llu seen_init=%u init_frame=%llu seen_finalize=%u finalize_frame=%llu history_evictions=%llu records=%llu scans=%llu rejected=%llu",
+        (const void *)s, readable, fields.magic, fields.fenced, (unsigned long long)fields.fence,
+        h.has_init, (unsigned long long)h.initialized, h.has_finalize, (unsigned long long)h.finalized,
+        (unsigned long long)evictions, (unsigned long long)atomic_load(&g_command_fence_records),
+        (unsigned long long)scans, (unsigned long long)failed);
+}
 
-NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0}; return 1; }
-NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
+NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) {
+    (void)d; *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), 0, 0};
+    sync_history_record(s, 1); return 1;
+}
+NVN(nvnSyncFinalize, void, NVNsync *s) {
+    sync_history_record(s, 0); ((sync_t *)s)->magic = 0;
+}
 // 围栏 = 「此前提交到队列的命令全部完成」：记下最近一次提交的栅栏值
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
 static void sync_set(sync_t *s, uint64_t fence) {
@@ -1152,6 +1263,7 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
 }
 NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *c, NVNsync *s, NVNsyncCondition condition, int flags) {
     p_fence_sync *r = REC(c, OP_FENCE_SYNC, p_fence_sync); *r = (p_fence_sync){s, condition, flags};
+    if (nvn_sync_trace_on()) atomic_fetch_add(&g_command_fence_records, 1);
     sync_t *o = (sync_t *)s;
     __atomic_store_n(&o->fence, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&o->fenced, 0, __ATOMIC_RELEASE);
@@ -1545,7 +1657,9 @@ static void bind_command_fences(const uint8_t *p, uint64_t submit, unsigned dept
         } else if (h.op == OP_FENCE_SYNC) {
             p_fence_sync f; memcpy(&f, a, sizeof f);
             sync_t *s = (sync_t *)f.sync;
-            if (s && s->magic == MAGIC('S', 'Y', 'N', 'C')) {
+            int accepted = s && s->magic == MAGIC('S', 'Y', 'N', 'C');
+            command_fence_observe(s, accepted);
+            if (accepted) {
                 sync_set(s, submit);
                 nvn_sync_trace_mark("nvnCommandBufferFenceSync", "bound-to-submit", submit, (uintptr_t)s);
             }
@@ -1787,6 +1901,15 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
 // Frame boundary: on each present, print / write to disk the call count of each NVN function for this frame
 static uint64_t g_prev[NVN_NFUNC];
 static FILE *g_tsv;
+static void debug_texture_lifetimes(void) {
+    uint64_t initialized = 0, finalized = 0;
+    for (unsigned i = 0; i < NVN_NFUNC; i++) {
+        if (!strcmp(nvn_names[i], "nvnTextureInitialize")) initialized = atomic_load(&nvn_slot[i].cnt);
+        else if (!strcmp(nvn_names[i], "nvnTextureFinalize")) finalized = atomic_load(&nvn_slot[i].cnt);
+    }
+    LOG("[DEBUG-UE-MEM] texture_initialize_total=%llu texture_finalize_total=%llu",
+        (unsigned long long)initialized, (unsigned long long)finalized);
+}
 static void dump_frame(void) {
     static int inited, nframes = 3, calls = 1;
     if (!inited) {
@@ -1815,6 +1938,14 @@ static void dump_frame(void) {
     // Every 300 frames read resident memory and hand it to the graphics layer to print the memory readout line (mtl_mem_stat, low frequency, capped). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
     if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+        if (g_flag.dbg) {
+            void svc_memory_report(void); void dm_ue_memory_report(void);
+            void mtl_res_counts(uint32_t, const char *);
+            svc_memory_report(); dm_ue_memory_report();
+            mtl_res_counts((uint32_t)g_frame, "memory-observation");
+            debug_texture_lifetimes();
+            debug_pool_report();
+        }
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); unsigned long long ht = 0, hf = 0, hm = 0; int dm_guest_heap_stat(unsigned long long *, unsigned long long *, unsigned long long *); int hok = dm_guest_heap_stat(&ht, &hf, &hm);
             void mtl_mem_stat(unsigned long long, unsigned long long, int, unsigned long long, unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb, hok, ht, hf, hm);
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }

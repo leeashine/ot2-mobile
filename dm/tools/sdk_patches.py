@@ -10,6 +10,14 @@ CUTS = {
     (0x346430, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
     (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager constructor: length of the node area registered as an occupied region mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
   ],
+  # OCTOPATH TRAVELER II 1.1.1: Engage's node-area cut, plus the 32 MiB large-region alignment
+  # used on other SDK builds below. The constructor is +0x346180; AllocateAddressRegion's
+  # >=1 GiB case selects 1 GiB at +0x34638c, wasting 768 MiB before UE's 4064 MiB region.
+  '5bcf525f24eb28658a8d67ac27800d9b': [
+    (0x346190, '08fca752', '087ca052', 'AddressRegionManager constructor: node area limit mov w8,#0x3fe00000 → mov w8,#0x3e00000'),
+    (0x34622c, '09fca752', '097ca052', 'AddressRegionManager constructor: occupied node area length mov w9,#0x3fe00000 → mov w9,#0x3e00000'),
+    (0x34638c, '0a00a852', '0a40a052', 'AllocateAddressRegion: alignment of regions of 1 GB and more mov w10,#0x40000000 → mov w10,#0x2000000 (32 MB, as from 32 MB up)'),
+  ],
   # Ace Attorney Investigations Collection 1.0.0.2 (v131072) sdk (SDK 17.5.3): the same node area cut as Engage's. Without it nninitStartup's StandardAllocator::Initialize(nullptr, pool − used)
   # (main+0x874b6c, virtual address memory) aborts at its first CentralHeap::Init: the 1 GB-aligned region of 3.14 GB did not fit in the 4.375 GB alias region after the node area.
   # The constructor is at sdk+0x139458 (limit = alias start + 0x3fe00000 at +0x28, a unit heap of 0x30-byte nodes, the area then registered as occupied)
