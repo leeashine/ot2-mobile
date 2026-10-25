@@ -81,7 +81,17 @@ Processing the complete local pending directory produced 1,712 unique shaders, c
 
 Reusing the same 3-GiB host, the matched frame-2400 diagnostic window had zero missing-map keys versus 95 before. Both repaired programs had a cache-hit PSO and one encoded Metal draw; their targets, numbered 15052/15053 in that run, were recorded as written. A subsequent 240-second story-progression run reached a non-purple tavern scene with visible people, flames and dialogue (local screenshot `run-79539-frame-006900.png`). The picture remains visibly blurred, and the longer run exposed 102 new missing-map keys: this is not a claim of complete rendering or full-session map coverage.
 
+### Depth-convention correction
+
+OT2 selects NVN near=0 depth, but the classic loader had always selected `main0`, whose translated vertex output applies the GL conversion `z/2+w/2`. The local object-layer snapshot now forwards DeviceSetDepthMode to the replay layer; ordinary vertex loads select `entry_z` and slice loads select `entry_layer_z`. Function-constant specialization uses the same selected entry. Missing entries are reported, and a mode change after vertex loading is reported rather than silently treated as supported.
+
+The same-input 300-second run logged `main0_z` and `main0_lz` before rendering, without a late-mode warning. The previous Agnea dialogue window was uniformly blurred; `run-52533-frame-008820.png` instead shows distinguishable characters, stage, lamps, tables and floor. The title sample `run-52533-frame-000900.png` still shows selective background blur. No DOF pass was disabled. This supports the depth-convention mismatch as the cause of the observed whole-screen blur, not a claim of full rendering correctness or playability. Host unit tests passed; the run had no Break and one newly observed missing shader key, `b9f763a3db71dfd4`.
+
 ## Known gaps
 
-- The uniform-purple failure is resolved in the observed tavern scene, but blur and 102 newly observed missing-map keys remain in the longer sample.
+- The observed uniform-purple and whole-screen-blur failures are resolved; full rendering correctness, interactive gameplay and the newly observed missing shader key remain unverified.
 - Unmatched/general geometry shaders are still unsupported; only the metadata-verified slice operation is folded into the vertex stage.
+
+## Before open-source release
+
+- Replace the inherited `$HOME/local-work` shader-capture destination in `m3_routea_hle_nvn.c` and `NSHomeDirectory()` diagnostic destinations in `m3_routea_nvn_mtl.m` with explicit environment-variable paths; when unset, disable diagnostic writes. These are known legacy runtime paths, not bundled game assets, and do not block this local milestone.
