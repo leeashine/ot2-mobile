@@ -6,8 +6,8 @@
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa | --prepare-xcode]; --prepare-xcode generates the project without building, signing or packing.
 #   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's external work folder, PATCHED / ROMFS / MSL_IOS can each be overridden
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
-#   M3_GFX_DIR=external classic-Metal NVN support sources (tex/ and nvn/ except hle_nvn.c); required for the NVN iOS 18 build, passed through dm/host/Makefile to gen_build.py
-#   The NVN HLE snapshot itself is in the repository (dm/host/m3_routea_hle_nvn.c); M3_GFX_DIR must not provide nvn/hle_nvn.c.
+#   M3_GFX_DIR=optional override for the bundled Route-A classic-Metal NVN sources; the default is dm/host/m3gfx.
+#   The NVN HLE snapshot is built from dm/host/m3_routea_hle_nvn.c, not from M3_GFX_DIR/nvn/hle_nvn.c.
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
@@ -58,7 +58,6 @@ V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")   #
 if [ -z "${GFXAPI:-}" ]; then if ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$'; then GFXAPI=nvn; elif [ -f "$MSL_IOS/vk/vk_shaders.metallib" ]; then GFXAPI=vulkan;
   elif [ -f "$MSL_IOS/gl/gl_shaders.metallib" ]; then GFXAPI=gl; else GFXAPI=nvn; fi; fi
 if [ "$GFXAPI" = nvn ]; then
-  [ -n "${M3_GFX_DIR:-}" ] || die "M3_GFX_DIR must point to the external classic-Metal NVN support sources for the iOS 18 target"
   [ -f "$DM/host/m3_routea_hle_nvn.c" ] || die "dm/host/m3_routea_hle_nvn.c is missing (the built-in NVN HLE snapshot the iOS 18 build links)"
 fi
 if [ "$GFXAPI" = vulkan ]; then [ -f "$MSL_IOS/vk/vk_shaders.metallib" ] || die "no iOS Vulkan shader library $MSL_IOS/vk (dm/gfx/tools/vk_shaders.py \"$ROMFS\" <Mac dir> --ios \"$MSL_IOS\")"
@@ -74,10 +73,16 @@ else [ -n "$V" ] && ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$' || 
 t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID), language $DM_LANG$([ $DM_SHOW_FPS = YES ] && echo ', frame-rate counter on')"
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
+M3_GFX_SOURCE_DIR=${M3_GFX_DIR:-"$DM/host/m3gfx"}
+case "$M3_GFX_SOURCE_DIR" in /*) ;; *) M3_GFX_SOURCE_DIR="$DM/host/$M3_GFX_SOURCE_DIR" ;; esac
 python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
 if [ "$GFXAPI" = nvn ]; then
-  ls Gen/src | grep -q '^host__m3_routea_hle_nvn\.c$' || die "gen_build.py did not put dm/host/m3_routea_hle_nvn.c into the Xcode sources (the iPhone build would render a fully blurred screen)"
-  for f in Gen/src/*; do [ "$(readlink "$f")" = "$M3_GFX_DIR/nvn/hle_nvn.c" ] && die "gen_build.py still takes nvn/hle_nvn.c from M3_GFX_DIR; the iOS build must link the in-repo dm/host/m3_routea_hle_nvn.c snapshot"; done
+  [ -f "$M3_GFX_SOURCE_DIR/nvn/nvn_tex.c" ] || die "missing Route-A NVN support sources: $M3_GFX_SOURCE_DIR"
+  [ -f "$DM/host/m3_routea_hle_nvn.c" ] || die "dm/host/m3_routea_hle_nvn.c is missing (the built-in NVN HLE snapshot the iOS build links)"
+  [ -L Gen/src/host__m3_routea_hle_nvn.c ] || die "gen_build.py did not include Route-A HLE (the game output would be blurred)"
+  if find Gen/src -maxdepth 1 -type l -name '*nvn__hle_nvn.c' -print | grep -q .; then
+    die "generated iOS sources include an external nvn/hle_nvn.c instead of the Route-A HLE"
+  fi
 fi
 F=$(python3 tools/gen_embed.py "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig

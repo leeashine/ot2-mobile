@@ -15,10 +15,9 @@ endif
 endif
 GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=-O1 -g -Wall -Wno-unused-function -arch arm64
-# Optional classic-Metal NVN backend. The source directory is deliberately
-# external while the OT2 trial is time-boxed; it must point at an MIT-licensed
-# d2r/route-a gfx tree containing nvn/, tex/, dm.h and front.h.
-M3_GFX_DIR ?=
+# Classic-Metal NVN backend. Bundled Route-A support sources are the default;
+# M3_GFX_DIR remains an optional local override for development.
+M3_GFX_DIR ?= $(CURDIR)/m3gfx
 ifneq ($(strip $(M3_GFX_DIR)),)
 CFLAGS += -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0
 M3_NVN_SRC = m3_routea_hle_nvn.c m3_routea_nvn_mtl.m \
@@ -28,8 +27,8 @@ M3_NVN_SRC = m3_routea_hle_nvn.c m3_routea_nvn_mtl.m \
 	$(M3_GFX_DIR)/tex/nvn_bcdec.c $(M3_GFX_DIR)/nvn/nvn_thunks.S \
 	$(M3_GFX_DIR)/nvn/nvn_entry.S
 GFX=$(sort $(wildcard ../gfx/*.c)) $(M3_NVN_SRC)
-GFX_H=$(sort $(wildcard $(M3_GFX_DIR)/nvn/*.h $(M3_GFX_DIR)/nvn/include/*.h $(M3_GFX_DIR)/tex/*.h))
-GFX_INC=-I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include
+GFX_H=$(sort $(wildcard $(M3_GFX_DIR)/*.h $(M3_GFX_DIR)/nvn/*.h $(M3_GFX_DIR)/nvn/include/*.h $(M3_GFX_DIR)/tex/*.h $(M3_GFX_DIR)/../gthread.h) $(M3_GFX_DIR)/third_party/bcdec/bcdec.h)
+GFX_INC=-I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/.. -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include
 M3_HOST_SRC=m3_routea_bridge.c
 else
 # NVN null device + nn::vi + the Vulkan/OpenGL layers (dm/gfx/).

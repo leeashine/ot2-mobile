@@ -1,17 +1,22 @@
 # Third-party notices
 
-## Optional d2r-mobile / Route-A classic-Metal NVN backend (MIT)
+## Bundled d2r-mobile / Route-A classic-Metal NVN backend (MIT)
 
-The optional `M3_GFX_DIR` build mode uses a local Route-A NVN object-layer
-snapshot (`dm/host/m3_routea_hle_nvn.c`) with the vendored classic-Metal replay
-backend `dm/host/m3_routea_nvn_mtl.m`. The replay file derives from
-`d2r-mobile/dm/gfx/nvn/nvn_mtl.m` at commit
-`9393b00ea9aca52d9254214da93738f26582562f`, through
-`ot2-ios-route-a/host/nvn_hle/nvn/nvn_mtl.m` at commit `60a7f0bc213e`.
-The remaining external `nvn/` and `tex/` files carry per-file source
-annotations. This trial selects that Route-A tree because it contains locally
-verified Octopath Traveler II object-layout fixes; nxnative's host, rewriter,
-profile handling and offline shader pipeline remain in use.
+The Route-A NVN object layer (`dm/host/m3_routea_hle_nvn.c`) and Metal replay
+backend (`dm/host/m3_routea_nvn_mtl.m`) use support sources vendored under
+`dm/host/m3gfx/`. The host Makefile selects this in-repository tree by default;
+`M3_GFX_DIR` is an optional override. Each copied d2r-mobile source retains its
+per-file `Source:` and MIT attribution. `dm/host/m3gfx/nvn/include/nvn.h`
+retains h1k421's upstream MIT license. Texture layout and deswizzle algorithms
+retain deko3d's zlib attribution. The vendored
+`dm/host/m3gfx/third_party/bcdec/bcdec.h` is bcdec v0.985 (upstream commit
+`80859ed`, Copyright (c) 2022 Sergii Kudlai), under its MIT/Unlicense dual
+license; the upstream license is included beside the header.
+`dm.h` and `front.h` are from `d2r-mobile/dm/host` at commit
+`9393b00ea9aca52d9254214da93738f26582562f`. The copied `gthread.h` is
+project-owned and covered by this repository's MIT license. `nvn_hle.h` is the
+Route-A host interface from commit `daff9d0d3be6a8c388c137dbc52a3baf2ce029dd`,
+not derived from d2r-mobile.
 
 The integer fragment-output entry loading, render-target-aware selection and
 failure hints in `dm/host/m3_routea_nvn_mtl.m` are ported from

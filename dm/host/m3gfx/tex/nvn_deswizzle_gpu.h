@@ -1,0 +1,20 @@
+// Source: d2r-mobile/dm/gfx/tex/nvn_deswizzle_gpu.h; commit 9393b00ea9aca52d9254214da93738f26582562f; MIT.
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#import <Metal/Metal.h>
+#include "nvn_deswizzle.h"
+#ifndef DM_NVN_M3
+#define DM_NVN_M3 0   // 见 nvn_mtl.m：1 = 图形后端走老接口 | see nvn_mtl.m: 1 = the graphics backend uses the older API
+#endif
+
+int nvn_deswz_gpu_init(id<MTLDevice> dev);
+int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, uint64_t src_off,
+                         const nvn_texdesc *d, unsigned level, unsigned layer,
+                         id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);
+#if !DM_NVN_M3
+int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                            const nvn_texdesc *d, unsigned level, unsigned layer,
+                            id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);
+#endif
