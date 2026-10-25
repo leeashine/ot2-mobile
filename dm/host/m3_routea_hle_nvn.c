@@ -729,11 +729,16 @@ static void snap_retire(const void *s) {   // 持 g_snap_mu | Holds g_snap_mu
     if (g_snap_nret == g_snap_capret) { g_snap_capret = g_snap_capret ? g_snap_capret * 2 : 256; g_snap_ret = realloc(g_snap_ret, g_snap_capret * sizeof *g_snap_ret); }
     g_snap_ret[g_snap_nret].s = (snap_slot *)s; g_snap_ret[g_snap_nret++].at = atomic_load(&g_x_subs);
 }
+void mtl_tex_snapshot_done(const tex_t *);
 static void snap_tick(uint64_t done) {   // 翻译线程每执行完一次提交：回收退役时已入队的提交都执行完、且又过了 SNAP_KEEP 次提交的副本 | Each time the translation thread finishes a submit: reclaim snapshots whose submits enqueued at retirement have all executed and that have passed SNAP_KEEP more submits
     pthread_mutex_lock(&g_snap_mu);
     g_snap_sub = done; size_t k = 0;
     for (size_t i = 0; i < g_snap_nret; i++) {
-        if (g_snap_ret[i].at + SNAP_KEEP <= g_snap_sub) { snap_slot *n = g_snap_ret[i].s; memset(n, 0, sizeof *n); n->next = g_snap_free; g_snap_free = n; g_snap_live--; }
+        if (g_snap_ret[i].at + SNAP_KEEP <= g_snap_sub) {
+            snap_slot *n = g_snap_ret[i].s;
+            if (n->t.magic == MAGIC('T', 'E', 'X', 0)) mtl_tex_snapshot_done(&n->t);
+            memset(n, 0, sizeof *n); n->next = g_snap_free; g_snap_free = n; g_snap_live--;
+        }
         else g_snap_ret[k++] = g_snap_ret[i];
     }
     g_snap_nret = k;
@@ -815,8 +820,9 @@ NVN(nvnTextureFinalize, void, NVNtexture *t) {
     tex_t *o = TX(t);
     nvn_storage_desc_destroy(tex_private_storage(t), o->serial);
     tex_private_storage_set(t, NULL);
+    mtl_tex_release(o);
     snap_drop(&o->snap, o->serial, offsetof(tex_t, serial));
-    mtl_tex_release(o); o->magic = 0;
+    o->magic = 0;
 }
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }

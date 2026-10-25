@@ -1821,7 +1821,6 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb, int heap_
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 uint64_t mtl_pkg_miss(void) { return g_pkg_miss; }
-void mtl_tex_release(tex_t *t) { if (t->serial) serial_del(t->serial); }
 
 // ---------- 渲染通道：SetRenderTargets 开新通道；通道里第一条命令之前的清除并进 load 动作 ----------
 // ---------- Render passes: SetRenderTargets opens a new pass; clears before the first command in the pass are folded into the load action ----------
@@ -3457,12 +3456,55 @@ static treg_t *g_treg; static int g_ntreg;
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview：采样器号 → MTLSamplerState（持有） | g_sview: sampler ID → MTLSamplerState (retained)
+// A CPU Finalize may precede playback of already-recorded commands. Cache
+// eviction waits for snapshot retirement and the last descriptor reference.
+// Both maps are protected by g_rmu; values are integer state/counts, not CF ids.
+static nvn_hmap g_texture_retired = {.klen = 8}, g_texture_descriptor_refs = {.klen = 8};
+static void texture_collect_locked(uint64_t serial) {
+    if ((uintptr_t)nvn_hm_get(&g_texture_retired, &serial) == 2 &&
+        !nvn_hm_get(&g_texture_descriptor_refs, &serial)) {
+        serial_del(serial);
+        nvn_hm_del(&g_texture_retired, &serial);
+    }
+}
+void mtl_tex_release(tex_t *t) {
+    if (!t->serial) return;
+    pthread_mutex_lock(&g_rmu);
+    nvn_hm_put(&g_texture_retired, &t->serial, (void *)(uintptr_t)(t->snap ? 1 : 2));
+    texture_collect_locked(t->serial);
+    pthread_mutex_unlock(&g_rmu);
+}
+void mtl_tex_snapshot_done(const tex_t *t) {
+    if (!t->serial) return;
+    pthread_mutex_lock(&g_rmu);
+    if (nvn_hm_get(&g_texture_retired, &t->serial)) {
+        nvn_hm_put(&g_texture_retired, &t->serial, (void *)(uintptr_t)2);
+        texture_collect_locked(t->serial);
+    }
+    pthread_mutex_unlock(&g_rmu);
+}
+static void texture_descriptor_ref_locked(uint64_t serial, int delta) {
+    if (!serial) return;
+    uintptr_t count = (uintptr_t)nvn_hm_get(&g_texture_descriptor_refs, &serial);
+    if (delta > 0) nvn_hm_put(&g_texture_descriptor_refs, &serial, (void *)(count + 1));
+    else if (count > 1) nvn_hm_put(&g_texture_descriptor_refs, &serial, (void *)(count - 1));
+    else {
+        nvn_hm_del(&g_texture_descriptor_refs, &serial);
+        texture_collect_locked(serial);
+    }
+}
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int id_ = tid; if (id_ < 0) return;
     pthread_mutex_lock(&g_rmu);
     if (id_ >= g_ntreg) { int n = id_ + 1024; g_treg = realloc(g_treg, n * sizeof *g_treg); memset(g_treg + g_ntreg, 0, (n - g_ntreg) * sizeof *g_treg); g_ntreg = n; }
     g_reg_gen++;
     if (g_treg[id_].view) { defer_obj_unref((__bridge id)g_treg[id_].view); CFRelease(g_treg[id_].view); g_treg[id_].view = NULL; g_treg[id_].view_id = g_treg[id_].view_rid = 0; }
+    uint64_t old_serial = g_treg[id_].ok ? g_treg[id_].t.serial : 0;
+    uint64_t new_serial = t ? t->serial : 0;
+    if (old_serial != new_serial) {
+        texture_descriptor_ref_locked(old_serial, -1);
+        texture_descriptor_ref_locked(new_serial, 1);
+    }
     g_treg[id_].ok = t != NULL; if (t) g_treg[id_].t = *t; g_treg[id_].has_v = v != NULL; if (v) g_treg[id_].v = *v;
     if (id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     pthread_mutex_unlock(&g_rmu);
