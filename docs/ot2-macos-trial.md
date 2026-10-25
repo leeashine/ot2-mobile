@@ -32,8 +32,29 @@ A macOS run using offline shaders produced real game pixels through Metal:
 
 The screenshots are kept only in `~/local-work/route-a-frames/`. This proves the hybrid path can execute OT2's real command flow and produce a visible Metal frame; it does not establish rendering correctness or playability.
 
+## UI and input follow-up
+
+`m3_routea_nvn_refl.m` normalizes separate texture reflection slots before facts-driven linking. UI text is now visible, including the settings page, title menu, traveler selection and Agnea's introduction. Scripted/interactive `DM_KEYS` and `DM_CTL` input has reached the adventure confirmation and story text. Screenshots remain local; scene loading previously ended in a guest Break as application-pool usage approached its limit.
+
+## OT2 allocator replacement
+
+For main build `65619a04b8a04b10d44f9996ef141062`, `GCreateMalloc` allocates the object and calls the FMallocBinned3 constructor at main+`0xbd4348`. That constructor reserves `0x940000000` bytes (37 GiB). The OT2 `patches.py` skips only that call; observation gate 21 at main+`0xbd434c` installs the existing host malloc-zone vtable before the object is published.
+
+The relocated guest table at main+`0x642c048` has 20 entries. Its allocation/free slots match the existing UE4 ABI, but it has no slot 20 (`OnMallocInitialized`). The host preserves trivial guest methods and replaces allocation, size, TLS-cache and allocator-stat dumping methods as for the other supported UE profiles. A synthetic test checks aligned allocation, realloc content preservation, usable size and balanced release without using game bytes.
+
+The profile requests a 3 GiB UE virtual address space with a 6 GiB alias region and a 6.625 GiB explicit guest reservation. In the same-host/6-GiB-alias comparison, 2 GiB reached Agnea's confirmation but hit a guest Break during scene allocation (`main+0xbd4a84` through `main+0xbd5518`). The 3 GiB sample ran for 300 seconds without Break, but its scene screenshot was entirely purple; this is not proof of playable gameplay. The kernel `phys_footprint` peak was 2,843 MiB. This is a macOS experiment, not evidence that the layout or footprint is valid on iPhone.
+
+## Integer fragment outputs
+
+The old classic-Metal backend always selected the default floating-point fragment entry. The local cache already contains `entry_u` metadata and `main0_u` functions, but rendering an integer attachment such as `R16Uint` still used `float4`, which Metal rejected.
+
+The entry loading, all-uint/mixed-uint render-target selection, integer blending rules and failed-pipeline facts hint are ported from nxnative `0f99c353d3abc334c39855d691afdfab40f4639f`. The external classic `nvn_refl` ABI is unchanged: whether the color-output mask is known is stored on `NvShader`. Existing explicit diagnostic fragment overrides keep precedence.
+
+The post-port 300-second run had zero `R16Uint` pipeline errors and zero guest Breaks, but still presented uniform purple. Its sampled peak RSS was 2,670.1 MiB (295 samples at approximately one second), and peak kernel `phys_footprint` was 2,777 MiB. The acceptance criterion “non-purple scene” is therefore **not met**.
+
+At diagnostic frame 2400, 42 color targets were registered for dumping. The first purple target in the observed post-processing chain was serial 15055, pass 182402, fragment key `8dc677a6f9e3de9f_b`; its scene-color input 15052 was dark but not purple. This pass also sampled a 32³ LUT (serial 1759) written by pass 182401 (`a7aa2c119e1ea39f_b`). Subsequent targets 15056/15057/15058 propagated purple into the present target. The LUT producer's vertex metadata (`25dadade83d69970_b`) supplies `entry_layer=main0_l`, and the captured geometry metadata (`439bed623be839b2_b`) supplies `gs_slice`; the current classic loader does not select those layer entries. That is a concrete next compatibility check, not yet proof of the remaining purple root cause.
+
 ## Known gaps
 
-- UI text is missing. The next check is whether the runtime font atlas contains pixels and whether its R8/A8 upload and text shader facts are correct.
+- The scene still becomes purple after tone mapping even with the integer-output errors eliminated. Layered LUT generation and its shader entry selection remain unverified.
 - The one observed geometry shader is represented as a slice/layer operation and currently has no standalone Metal library in this classic backend.
-- Input-driven title/gameplay screenshots have not yet been captured.

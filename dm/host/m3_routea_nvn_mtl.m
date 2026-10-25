@@ -1,6 +1,10 @@
 // Source: d2r-mobile/dm/gfx/nvn/nvn_mtl.m; commit 9393b00ea9aca52d9254214da93738f26582562f; MIT.
 // OT2 integration snapshot: ot2-ios-route-a/host/nvn_hle/nvn/nvn_mtl.m;
 // commit 60a7f0bc213e. Route-B offline shader selection below is local.
+// Integer fragment entry loading/selection and failure hints ported from
+// nxnative/dm/gfx/nvn/nvn_mtl.m@0f99c353d3abc334c39855d691afdfab40f4639f,
+// lines 2914, 3099-3106, 4183-4214, 4232-4233, 4343-4353, 7602-7610.
+// Copyright (c) 2026 seedds. MIT; see LICENSE and THIRD-PARTY-NOTICES.md.
 // NVN 空设备的 Metal 执行层，见 nvn_mtl.h。
 // Metal execution layer of the NVN null device, see nvn_mtl.h.
 #ifndef _DARWIN_C_SOURCE
@@ -2549,7 +2553,7 @@ static void shmap_load(void) {
     warm_start();
 }
 
-@interface NvShader : NSObject { @public id<MTLFunction> fn; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro; const char *builtin; uint64_t logged; char key[65]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off; id assumed_facts; NSString *facts_sha;
+@interface NvShader : NSObject { @public id<MTLFunction> fn, fn_u, fn_m; uint8_t mask_m, color_known; nvn_refl rf; id<MTLArgumentEncoder> ae; NSUInteger arg_len; int stage, range_ro; const char *builtin; uint64_t logged; char key[65]; id<MTLBuffer> c1buf; uint64_t c1_gpu; size_t c1off; id assumed_facts; NSString *facts_sha;
     // 上次编好的参数缓冲
     // The argument buffer encoded last time
     id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass;
@@ -3140,6 +3144,25 @@ static NvShader *shader_load(NSString *pc, int stage, NSDictionary *selected) {
     o->assumed_facts = route_a ? @{@"summary": j[@"facts_summary"]} : nil;
     o->facts_sha = route_a ? [j[@"facts_sha256"] copy] : nil;
     o->fn = [lib newFunctionWithName:j[@"entry"]]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+    // Keep the external classic-Metal nvn_refl ABI unchanged.
+    NSDictionary *raster = j[@"raster"];
+    o->color_known = [raster isKindOfClass:[NSDictionary class]] && [raster[@"colors"] isKindOfClass:[NSArray class]];
+    if (stage == 1 && j[@"entry_u"]) {
+        o->fn_u = [lib newFunctionWithName:j[@"entry_u"]];
+        if (!o->fn_u) MLOG("【红】着色器 %s 无整数输出入口 %s", pc.UTF8String, [j[@"entry_u"] UTF8String]);
+    }
+    if (stage == 1 && j[@"entry_m"]) {
+        o->fn_m = [lib newFunctionWithName:j[@"entry_m"]];
+        o->mask_m = (uint8_t)[j[@"uint_mask_m"] unsignedIntValue];
+        if (!o->fn_m) MLOG("【红】着色器 %s 无混合整数输出入口 %s", pc.UTF8String, [j[@"entry_m"] UTF8String]);
+    }
+    if (o->fn.functionConstantsDictionary.count) {
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+        id<MTLFunction> f = [lib newFunctionWithName:j[@"entry"] constantValues:cv error:&e];
+        if (f) o->fn = f; else MLOG("【红】着色器 %s 函数常量特化失败：%s", pc.UTF8String, e.localizedDescription.UTF8String);
+        if (o->fn_u) o->fn_u = [lib newFunctionWithName:j[@"entry_u"] constantValues:cv error:&e];
+        if (o->fn_m) o->fn_m = [lib newFunctionWithName:j[@"entry_m"] constantValues:cv error:&e];
+    }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
@@ -4739,6 +4762,50 @@ static void nvn_5ffd_bind_c1_out(id<MTLRenderCommandEncoder> en, const NvShader 
     if (nlog++ < 4) MLOG("[5ffd-diag] c1 直出绑定 gpu=%#llx（默认 zero_bank；配位 4 为活 Data 后缀 c1）", (unsigned long long)gpu);
 }
 static nvn_hmap g_pso = {.klen = sizeof(pso_key)}, g_dss;
+// nxnative@0f99c35: preserve integer bit patterns at integer color attachments.
+static int pf_int_kind(MTLPixelFormat f) {
+    switch (f) {
+        case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint:
+        case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGB10A2Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint: return 1;
+        case MTLPixelFormatR8Sint: case MTLPixelFormatR16Sint: case MTLPixelFormatR32Sint: case MTLPixelFormatRG8Sint: case MTLPixelFormatRG16Sint: case MTLPixelFormatRG32Sint:
+        case MTLPixelFormatRGBA8Sint: case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA32Sint: return 2;
+        default: return 0;
+    }
+}
+static int pso_all_uint(const pso_key *k, NvShader *fs, int merged) {
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!k->cfmt[i]) continue;
+        int l = merged ? k->lmap[i] : i;
+        if (l == 0xff || (fs->color_known && !(fs->rf.color_mask >> l & 1))) continue;
+        if (pf_int_kind((MTLPixelFormat)k->cfmt[i]) != 1) return 0;
+        n++;
+    }
+    return n > 0;
+}
+static int pso_mixed_uint(const pso_key *k, NvShader *fs, int merged) {
+    int ints = 0, floats = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!k->cfmt[i]) continue;
+        int l = merged ? k->lmap[i] : i;
+        if (l == 0xff || (fs->color_known && !(fs->rf.color_mask >> l & 1))) continue;
+        int u = pf_int_kind((MTLPixelFormat)k->cfmt[i]) == 1;
+        if (u != (l < 8 && (fs->mask_m >> l & 1))) return 0;
+        if (u) ints++; else floats++;
+    }
+    return ints && floats;
+}
+static const char *pso_fout_hint(NvShader *fs, const uint32_t cfmt[8], char *b, size_t n) {
+    if (!fs || strlen(fs->key) < 16) return "";
+    int o = snprintf(b, n, "; if its outputs are integers, add to shader_facts_manual.tsv: %.16s\t{\"fout\":{", fs->key), any = 0;
+    for (int c = 0; c < 8; c++) {
+        int kind = !fs->color_known || fs->rf.color_mask >> c & 1 ? pf_int_kind((MTLPixelFormat)cfmt[c]) : 0;
+        if (kind && o < (int)n) o += snprintf(b + o, n - o, "%s\"%d\":\"%s\"", any++ ? "," : "", c, kind == 1 ? "uint" : "sint");
+    }
+    if (!any) return "";
+    if (o < (int)n) snprintf(b + o, n - o, "}}");
+    return b;
+}
 static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvShader *fs, id<MTLFunction> fsfn, int merged) {
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = vs->fn; d.fragmentFunction = fsfn ? fsfn : fs ? fs->fn : nil;
@@ -4761,6 +4828,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         if (nvn_5ffd_diag_mode() & 8) { if (nvn_5ffd_diag_init()) d.fragmentFunction = g_5ffd_diag.fn_c1; }
         else if (nvn_5ffd_diag_mode() & 2) { if (nvn_5ffd_diag_init()) d.fragmentFunction = g_5ffd_diag.fn_sample; }
     }
+    if (fs && !fsfn && d.fragmentFunction == fs->fn) {
+        if (fs->fn_u && pso_all_uint(k, fs, merged)) d.fragmentFunction = fs->fn_u;
+        else if (fs->fn_m && pso_mixed_uint(k, fs, merged)) d.fragmentFunction = fs->fn_m;
+    }
     d.rasterSampleCount = k->samples ? k->samples : 1;
     d.alphaToCoverageEnabled = k->a2c;
     for (int i = 0; i < 8; i++) {
@@ -4769,8 +4840,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         c.pixelFormat = (MTLPixelFormat)k->cfmt[i];
         int l = merged ? k->lmap[i] : i;
         uint32_t m = l == 0xff ? 0 : (k->chmask >> (4 * l)) & 0xf;
+        int unwritten = fs && fs->color_known && !fsfn && l != 0xff && !(fs->rf.color_mask >> l & 1);
+        if (unwritten) m = 0;
         c.writeMask = (m & 1 ? MTLColorWriteMaskRed : 0) | (m & 2 ? MTLColorWriteMaskGreen : 0) | (m & 4 ? MTLColorWriteMaskBlue : 0) | (m & 8 ? MTLColorWriteMaskAlpha : 0);
-        if (l != 0xff && k->blend_en >> l & 1) {
+        if (l != 0xff && k->blend_en >> l & 1 && !unwritten && !pf_int_kind(c.pixelFormat)) {
             c.blendingEnabled = YES;
             c.sourceRGBBlendFactor = bfac(k->blend[l].src_rgb); c.destinationRGBBlendFactor = bfac(k->blend[l].dst_rgb);
             c.sourceAlphaBlendFactor = bfac(k->blend[l].src_a); c.destinationAlphaBlendFactor = bfac(k->blend[l].dst_a);
@@ -4867,7 +4940,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
         if (ps && g_draw_trace) g_draw_trace->pipeline = "built";
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
-    if (!ps) { if (g_draw_trace) g_draw_trace->pipeline = "build-failed"; MLOG("【红】建渲染管线失败：%s", e.localizedDescription.UTF8String); return nil; }
+    if (!ps) { char hint[320]; if (g_draw_trace) g_draw_trace->pipeline = "build-failed"; MLOG("【红】建渲染管线失败 FS=%s：%s%s", fs ? fs->key : "-", e.localizedDescription.UTF8String, pso_fout_hint(fs, k.cfmt, hint, sizeof hint)); return nil; }
     pso_skey sk; char shex[sizeof sk * 2 + 1]; pso_skey_from(&k, vs, fs, g_pso_lmap != NULL, g_pso_lmap ? &g_pso_fz : NULL, &sk); pso_skey_hex(&sk, shex);
     if (ot2_nvn_hle_enabled() &&
         route_a_link_add(&g_route_a_link_psos, [NSString stringWithUTF8String:shex]))
