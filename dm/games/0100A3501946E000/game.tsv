@@ -15,8 +15,8 @@ zip_store	.awb:.pak:.usm:.metallib
 # patches.py and hle_uemalloc.c replace the 37 GiB FMallocBinned3 pools.
 # Keep the existing SDK node area; allow UE VA plus alignment slack.
 game_args	-SwitchVirtualAddressSpaceSize=3072
-mem_reserve	0x1A8000000
-mem_alias	0x180000000
+mem_reserve	0x168000000
+mem_alias	0x140000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x5000000

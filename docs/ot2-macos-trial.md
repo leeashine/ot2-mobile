@@ -42,7 +42,7 @@ For main build `65619a04b8a04b10d44f9996ef141062`, `GCreateMalloc` allocates the
 
 The relocated guest table at main+`0x642c048` has 20 entries. Its allocation/free slots match the existing UE4 ABI, but it has no slot 20 (`OnMallocInitialized`). The host preserves trivial guest methods and replaces allocation, size, TLS-cache and allocator-stat dumping methods as for the other supported UE profiles. A synthetic test checks aligned allocation, realloc content preservation, usable size and balanced release without using game bytes.
 
-The profile requests a 3 GiB UE virtual address space with a 6 GiB alias region and a 6.625 GiB explicit guest reservation. In the same-host/6-GiB-alias comparison, 2 GiB reached Agnea's confirmation but hit a guest Break during scene allocation (`main+0xbd4a84` through `main+0xbd5518`). The 3 GiB sample ran for 300 seconds without Break, but its scene screenshot was entirely purple; this is not proof of playable gameplay. The kernel `phys_footprint` peak was 2,843 MiB. This is a macOS experiment, not evidence that the layout or footprint is valid on iPhone.
+The original experiments used a 3 GiB UE virtual address space with a 6 GiB alias region and a 6.625 GiB explicit guest reservation; the current approved profile uses the smaller tested 5 GiB alias / 5.625 GiB reservation below, with UE VA unchanged. In the same-host/6-GiB-alias comparison, 2 GiB reached Agnea's confirmation but hit a guest Break during scene allocation (`main+0xbd4a84` through `main+0xbd5518`). The 3 GiB sample ran for 300 seconds without Break, but its scene screenshot was entirely purple; this is not proof of playable gameplay. The kernel `phys_footprint` peak was 2,843 MiB. This is a macOS experiment, not evidence that the layout or footprint is valid on iPhone.
 
 ## Integer fragment outputs
 
@@ -87,9 +87,33 @@ OT2 selects NVN near=0 depth, but the classic loader had always selected `main0`
 
 The same-input 300-second run logged `main0_z` and `main0_lz` before rendering, without a late-mode warning. The previous Agnea dialogue window was uniformly blurred; `run-52533-frame-008820.png` instead shows distinguishable characters, stage, lamps, tables and floor. The title sample `run-52533-frame-000900.png` still shows selective background blur. No DOF pass was disabled. This supports the depth-convention mismatch as the cause of the observed whole-screen blur, not a claim of full rendering correctness or playability. Host unit tests passed; the run had no Break and one newly observed missing shader key, `b9f763a3db71dfd4`.
 
+### Agnea controls and longer clear-scene samples
+
+The approved depth/object snapshot is archived locally as `625903f` (no push). With the same binary, the 600-second and 380-second samples both exited gracefully without a guest Break. In the latter, `B` closes Basic Controls, left/down stick inputs change Agnea's position relative to the stage and stationary NPCs, and `X` opens the actual main menu. Local frames `run-20459-frame-008880.png`, `009120.png`, `009360.png` and `009600.png` show the sequence. Continuous scripted `A` had previously reopened Inventory; that was input interference, not movement evidence.
+
+The 500 presented-frame samples 9000–9499 averaged 29.957 FPS in both runs, with 95th-percentile frame times of 34.158/34.171 ms. This is paced presentation, not an uncapped GPU benchmark. Sampled RSS peaks were 2,901.6/2,846.1 MiB; kernel `phys_footprint` peaks were 3,004/3,017 MiB. The tested state is the tavern objective “Collect tips from the tavern patrons”, not combat or new-area exploration.
+
+The runs exposed 21/17 distinct missing-map keys. All are covered by a new private capture package of 1,835 shaders; 1,835/1,835 built successfully on the unchanged `e83a95ef084e` chain, including 21 newly compiled Metal libraries. Its tables/cache are separate from the online runs (`runtime-capture-play/`, `ot2-shaders/cache-a-play/`), so those runs do not prove zero remaining misses after the rebuild.
+
+A local-only AudioUnit callback probe measured the PCM16 already produced by the game's output, without retaining raw samples. In the 55-second title smoke, output 0 at callback 4000 had 1,024/1,024 nonzero samples and peak amplitude 5,529/32,768; output 1 remained zero at those sampled callbacks. This proves nonzero game audio reaches the CoreAudio callback, not subjective listening quality or complete voice/effect support. An earlier probe forwarding method stalled AudioUnit initialization; that sample is excluded. The corrected probe reached the visible title screen and exited normally. The same smoke loaded all 1,835 map entries with zero missing-map warnings, but did not exercise every newly built shader.
+
+### Smaller reservation experiment (UE VA remains 3072 MiB)
+
+| Alias / explicit reserve | Observed result |
+|---|---|
+| 4.375 / 5 GiB (`0x118000000` / `0x140000000`) | SDK `AllocateAddressRegion` returned `ResultOutOfVirtualAddressSpace` for the 3 GiB UE request; guest Break before the first frame. |
+| 5 / 5.625 GiB (`0x140000000` / `0x168000000`) | Private-header build reached tavern dialogue, control HUD and 11,160 presents; 376 seconds wall time, graceful exit 0. |
+| 5.5 / 6.125 GiB | Privately compiled but not run; the smaller tested case already passed. |
+
+The smallest **tested passing** alias is 5 GiB; values between 4.375 and 5 GiB are untested. The passing sample's RSS peak was 2,673.6 MiB and kernel footprint peak was 3,173 MiB. Concurrent compilation, compression and differing run lengths prevent a causal physical-memory comparison. These are macOS results, not iPhone entitlement or memory-limit evidence. Following explicit approval, `game.tsv` now adopts `mem_reserve=0x168000000` and `mem_alias=0x140000000`, retaining `-SwitchVirtualAddressSpaceSize=3072`. The failed 4.375-GiB target remains recorded above; private comparison evidence stays under `small-va-trial/va-a5/`.
+
+### Diagnostic disk limits
+
+Before and during future runs, keep available disk above 9 GiB; do not start, or stop owned game processes, at or below that threshold. Disable periodic frame capture (`OT2_NVN_CAPTURE_EVERY=0`); use at most 16 explicit `DM_NVN_SHOT` frames and at most four manual shots per run. Keep key evidence, compress completed large logs, and remove completed private `temp/` directories without touching saves, shared caches or other sessions' files.
+
 ## Known gaps
 
-- The observed uniform-purple and whole-screen-blur failures are resolved; full rendering correctness, interactive gameplay and the newly observed missing shader key remain unverified.
+- The observed uniform-purple and whole-screen-blur failures are resolved, and movement/main-menu input is verified in the tavern. Combat, extended exploration, full rendering correctness and rebuilt-cache coverage in later scenes remain unverified.
 - Unmatched/general geometry shaders are still unsupported; only the metadata-verified slice operation is folded into the vertex stage.
 
 ## Before open-source release
