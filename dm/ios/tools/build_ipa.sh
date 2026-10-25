@@ -4,8 +4,9 @@
 # In --prepare-xcode mode the generated project copies those resources before Xcode signs it with the team the user selects. This script never signs or installs anything.
 # Prerequisites: the rewriter (patched directory) and the iOS shader build (IOSOUT) have been run as in the README; Xcode and xcodegen are installed.
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa | --prepare-xcode]; --prepare-xcode generates the project without building, signing or packing.
-#   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's work folder (required: <NSP folder>/<title ID>-work, never the home folder), PATCHED / ROMFS / MSL_IOS can each be overridden
+#   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's external work folder, PATCHED / ROMFS / MSL_IOS can each be overridden
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
+#   M3_GFX_DIR=external classic-Metal NVN source tree; required for the NVN iOS 18 build, passed through dm/host/Makefile to gen_build.py
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
@@ -27,24 +28,24 @@ PREPARE_XCODE=NO; [ "${1:-}" != --prepare-xcode ] || PREPARE_XCODE=YES
 OUT_IPA=${1:-$(dirname "$W")/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 XCODE_DD=${DM_XCODE_DERIVED_DATA:-$W/build/ios/xcode-dd}
 MODS=$(gp modules); MARKER=$(gp romfs_marker)
-NACP=$W/data/v0/control.nacp; [ -f "$NACP" ] || NACP=$(dirname "$ROMFS")/control.nacp
+NACP=$W/data/$PKG/control.nacp; [ -f "$NACP" ] || NACP=$(dirname "$ROMFS")/../control.nacp; [ -f "$NACP" ] || NACP=$(dirname "$ROMFS")/control.nacp
 [ -n "${DM_DISPLAY_NAME:-}" ] || DM_DISPLAY_NAME=$(python3 "$DM/tools/nacp.py" "$NACP") || die "no game name in $NACP (re-extract with nx_extract, or set DM_DISPLAY_NAME)"
-VNACP=$(dirname "$ROMFS")/control.nacp; [ -f "$VNACP" ] || VNACP=$W/data/v0/control.nacp
+VNACP=$(dirname "$ROMFS")/control.nacp; [ -f "$VNACP" ] || VNACP=$(dirname "$ROMFS")/../control.nacp; [ -f "$VNACP" ] || VNACP=$W/data/$PKG/control.nacp
 [ -n "${DM_APP_VERSION:-}" ] || DM_APP_VERSION=$(python3 "$DM/tools/nacp.py" --version "$VNACP") || { t "no display version in $VNACP: the app version is 1.0"; DM_APP_VERSION=1.0; }
 export LC_ALL=C DM_BUNDLE_ID=${DM_BUNDLE_ID:-org.nxnative.$(echo "$GAME" | tr 'A-Z' 'a-z')} DM_DISPLAY_NAME DM_APP_VERSION DM_APP_CATEGORY=$(gp app_category) DM_TEAM_ID=${DM_TEAM_ID:-0000000000}   # placeholder identity: unsigned, the install tool replaces it
 if [ "${DM_SHOW_FPS:-0}" = 1 ]; then export DM_SHOW_FPS=YES; else export DM_SHOW_FPS=NO; fi
 export DM_LANG=${DM_LANG:-en-US}
-if [ "$PREPARE_XCODE" = YES ]; then
-  IOS=${DM_XCODE_PROJECT_DIR:-$W/xcode}
-  mkdir -p "$IOS" || die "mkdir $IOS"
-  IOS=$(cd "$IOS" && pwd)
-  [ "$IOS" != "$IOS_SOURCE" ] || die "the per-game Xcode project must be outside dm/ios"
-  # Source links follow repository edits; generated files and build products belong to this game only. Linked again each time: a project prepared from another checkout (a removed worktree) follows this one
-  for item in Sources tools; do ln -sfn "$IOS_SOURCE/$item" "$IOS/$item" || die "link $item"; done
-  cp "$IOS_SOURCE/project.yml" "$IOS/project.yml" || die "copy project template"
-  cd "$IOS" || die "cd $IOS"
-  DM_SCHEME_NAME="$(echo "$DM_DISPLAY_NAME" | tr '/:' '__') ($GAME)"   # the scheme file is named after it
-
+IOS=${DM_XCODE_PROJECT_DIR:-$W/xcode}
+mkdir -p "$IOS" || die "mkdir $IOS"
+IOS=$(cd "$IOS" && pwd)
+[ "$IOS" != "$IOS_SOURCE" ] || die "the per-game Xcode project must be outside dm/ios"
+# Keep generated sources (including embedded rewritten modules) and project products with this game's external work files.
+# Source links follow repository edits. Linked again each time: a project prepared from another checkout follows this one.
+for item in Sources tools Compat; do ln -sfn "$IOS_SOURCE/$item" "$IOS/$item" || die "link $item"; done
+ln -sfn "$DM/host" "$IOS/host" || die "link host headers"
+cp "$IOS_SOURCE/project.yml" "$IOS/project.yml" || die "copy project template"
+cd "$IOS" || die "cd $IOS"
+if [ "$PREPARE_XCODE" = YES ]; then DM_SCHEME_NAME="$(echo "$DM_DISPLAY_NAME" | tr '/:' '__') ($GAME)"  # per-game scheme name
 else DM_SCHEME_NAME=DmIOS; fi
 export DM_SCHEME_NAME
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
@@ -55,6 +56,10 @@ V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")   #
 # libraries in $MSL_IOS tell: the chain's b-$V, else vk, else gl
 if [ -z "${GFXAPI:-}" ]; then if ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$'; then GFXAPI=nvn; elif [ -f "$MSL_IOS/vk/vk_shaders.metallib" ]; then GFXAPI=vulkan;
   elif [ -f "$MSL_IOS/gl/gl_shaders.metallib" ]; then GFXAPI=gl; else GFXAPI=nvn; fi; fi
+if [ "$GFXAPI" = nvn ]; then
+  [ -n "${M3_GFX_DIR:-}" ] || die "M3_GFX_DIR must point to the external classic-Metal NVN source tree for the iOS 18 target"
+  [ -f "$M3_GFX_DIR/nvn/hle_nvn.c" ] || die "M3_GFX_DIR has no nvn/hle_nvn.c: $M3_GFX_DIR"
+fi
 if [ "$GFXAPI" = vulkan ]; then [ -f "$MSL_IOS/vk/vk_shaders.metallib" ] || die "no iOS Vulkan shader library $MSL_IOS/vk (dm/gfx/tools/vk_shaders.py \"$ROMFS\" <Mac dir> --ios \"$MSL_IOS\")"
 elif [ "$GFXAPI" = gl ]; then [ -f "$MSL_IOS/gl/gl_shaders.metallib" ] || die "no iOS GL shader library $MSL_IOS/gl (dm/gfx/tools/gl_shaders.py \"$ROMFS\" <main> <Mac dir> --ios \"$MSL_IOS\")"
 else [ -n "$V" ] && ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$' || die "no iOS shader libraries $MSL_IOS/b-$V (IOSOUT=$MSL_IOS dmsh_build.py ...)"
