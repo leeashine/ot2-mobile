@@ -1,7 +1,7 @@
 // Mac front end: with DM_WINDOW=1 open a window (CAMetalLayer, for the graphics backend to present frames) + keyboard and controllers → dm_input; the guest runs on a large-stack thread instead and the main thread belongs to AppKit.
 // Without DM_WINDOW: the guest runs directly on the current thread, behaving the same as with no front end (windowless tests use this).
 // The window is fullscreen-capable (the green button and ⌃⌘F); DM_FULLSCREEN starts it that way. ⌘Q quits; the left mouse button is the touchscreen.
-// Key map (Nintendo layout): WASD left stick, arrow keys D-pad, Return/Space=A Esc/Delete=B X/Tab=X Y=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, P=+ O=−.
+// Key map (Nintendo layout): WASD left stick, arrow keys D-pad, Return/Space=A Esc/Delete/B=B X/Tab=X Y=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, P=+ O=−.
 // Controllers: buttons by position as on the iPhone (right A, bottom B, top X, left Y), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -88,7 +88,7 @@ static void push(void) {
 static int key_bit(unsigned short code) {
     switch (code) {
         case 36: return 0;  case 49: return 0; // Return / Space → A
-        case 53: return 1;  case 51: return 1; // Esc / Delete → B
+        case 53: case 51: case 11: return 1; // Esc / Delete / B → B
         case 7: return 2;   case 48: return 2; // X / Tab → X
         case 16: return 3;                       // Y → Y
         case 3: return 4;   case 5: return 5;                                            // F G → press stick
