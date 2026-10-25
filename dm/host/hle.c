@@ -25,14 +25,29 @@ uint64_t unimpl_c(unsigned idx, uint64_t *regs) {
 // Per module, one cache of symbol number → resolved address
 static uint64_t g_cache[MAX_MOD][8192];
 
+static const hle_ent *hle_find(const char *name) {
+    unsigned long nsz = 0; const hle_ent *native =
+        (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &nsz);
+    for (unsigned i = 0; native && i < nsz / sizeof *native; i++)
+        if (!strcmp(native[i].name, name)) return &native[i];
+#ifdef DM_ROUTE_A_GFX
+    // The time-boxed classic-Metal backend keeps Route-A's original section
+    // name. Treat it as a normal HLE table; loader.c separately forces only
+    // main:nvnBootstrapLoader to this entry.
+    unsigned long rsz = 0; const hle_ent *route_a =
+        (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "ot2hle", &rsz);
+    for (unsigned i = 0; route_a && i < rsz / sizeof *route_a; i++)
+        if (!strcmp(route_a[i].name, name)) return &route_a[i];
+#endif
+    return NULL;
+}
+
 uint64_t resolve_import(module_t *m, const char *name) {
-    static const hle_ent *sec; static unsigned long secsz;
-    if (!sec) sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
-    for (unsigned i = 0; i < secsz / sizeof(hle_ent); i++)
-        if (!strcmp(sec[i].name, name)) {
-            if (g_flag.imports) { Dl_info di; dladdr(sec[i].fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
-            void *hlecount_wrap(const char *, const char *, void *); return (uint64_t)hlecount_wrap("HLE", name, sec[i].fn);   // With DM_HLECOUNT it is a counting stub (including the libc passthrough table)
-        }
+    const hle_ent *ent = hle_find(name);
+    if (ent) {
+        if (g_flag.imports) { Dl_info di; dladdr(ent->fn, &di); LOG("import %s -> %s", name, di.dli_sname); }
+        void *hlecount_wrap(const char *, const char *, void *); return (uint64_t)hlecount_wrap("HLE", name, ent->fn);   // With DM_HLECOUNT it is a counting stub (including the libc passthrough table)
+    }
     // Reuse the stub if one was already allocated for the same name
     void *hlecount_wrap(const char *, const char *, void *);
     for (unsigned k = 0; k < g_nstub; k++)
@@ -44,12 +59,8 @@ uint64_t resolve_import(module_t *m, const char *name) {
     return (uint64_t)hlecount_wrap("STUB", name, (void *)&unimpl_stubs[k]);
 }
 
-// The host implements this import (the swhle table), without allocating a stub for it
-int hle_implements(const char *name) {
-    unsigned long secsz; const hle_ent *sec = (const hle_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swhle", &secsz);
-    for (unsigned i = 0; sec && i < secsz / sizeof(hle_ent); i++) if (!strcmp(sec[i].name, name)) return 1;
-    return 0;
-}
+// The host implements this import, without allocating a stub for it.
+int hle_implements(const char *name) { return hle_find(name) != NULL; }
 
 void stubs_report(void) { LOG("stubs=%u", g_nstub); }
 

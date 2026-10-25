@@ -392,6 +392,35 @@ def paks(romfs):
     """Every pak under the RomFS"""
     return sorted(os.path.join(dp, f) for dp, _, fs in os.walk(romfs) for f in fs if f.endswith('.pak'))
 
+def inline_shader_names(pak):
+    """Cooked-package files that may hold inline LSLG records.
+
+    Unreal projects with a shader code archive are handled by ``job`` instead.
+    Older games and Octopath Traveler II keep global shaders in
+    GlobalShaderCache and material shaders in .uexp files.
+    """
+    names = tuple(sorted(pak.files))
+    if any(name.lower().endswith('.ushaderbytecode') for name in names):
+        return ()
+    return tuple(name for name in names
+                 if name.lower().endswith('.uexp')
+                 or os.path.basename(name).lower().startswith('globalshadercache-')
+                 and name.lower().endswith('.bin'))
+
+
+def inline_shader_paks(romfs):
+    """Unencrypted Unreal paks whose shaders are inline in cooked files."""
+    out = []
+    for path in unreal_paks(romfs):
+        try:
+            pak = Pak(path)
+            if inline_shader_names(pak): out.append(path)
+            pak.f.close()
+        except (OSError, ValueError, struct.error):
+            continue
+    return out
+
+
 def unreal_paks(romfs, legacy=None):
     """The paks under the RomFS that Unreal wrote (its magic in the footer; legacy None = any version, True = the legacy versions, False = the others): with version 11 the NSP script decodes
     the shader code archives (decode_ue_shaders); legacy paks keep the shaders inline in the cooked packages, which shader_split.py reads through the game's decoder (ue_legacy_jobs)"""

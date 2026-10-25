@@ -271,7 +271,16 @@ static unsigned relr_apply(module_t *m, uint64_t relr, uint64_t relrsz, uint64_t
 // The address a symbol relocation of module m binds to, as Horizon's rtld would with the modules loaded now (forced take-over, then the loaded modules in load order, then HLE / stub).
 // *other: the module's own definition was taken over by an earlier module's; *weak0: an undefined weak symbol nothing defines, bound to 0
 static uint64_t bind_sym(module_t *m, const Elf64_Sym *s, int *other, int *weak0) {
-    uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
+    const char *nm = m->strtab + s->st_name;
+#ifdef DM_ROUTE_A_GFX
+    // Route-A registers its bootstrap in the supplemental HLE section rather
+    // than nxnative's force table. Only main's import is taken over; SDK
+    // internals and every other symbol retain normal resolution semantics.
+    uint64_t v = !strcmp(m->name, "main") && !strcmp(nm, "nvnBootstrapLoader")
+        ? resolve_import(m, nm) : (uint64_t)force_lookup(nm);
+#else
+    uint64_t v = (uint64_t)force_lookup(nm);
+#endif
     *other = *weak0 = 0;
     // Symbols the module defines itself are also looked up globally in load order (the ELF default; Horizon's rtld does the same): the definition of an earlier-loaded module overrides a later one; only local / non-default visibility binds to itself.
     // Engage's main defines its own operator new / delete (Unity's memory manager) and sdk has a copy too (forwarding to malloc / free): previously sdk bound its own delete,
@@ -284,7 +293,6 @@ static uint64_t bind_sym(module_t *m, const Elf64_Sym *s, int *other, int *weak0
     }
     // An undefined weak symbol that no module defines and the host does not implement is 0, as Horizon's rtld binds it: the code tests its address before calling it.
     // Octopath Traveler 0's main imports the thread_local init function _ZTHN13LowLevelTasks5FTask10ActiveTaskE weakly; a named stub made it look defined and the game called it
-    const char *nm = m->strtab + s->st_name;
     *weak0 = !v && !s->st_shndx && ELF64_ST_BIND(s->st_info) == STB_WEAK && !loaded_sym(nm) && !hle_implements(nm);
     if (!v && !*weak0) v = resolve_sym(m, nm);
     return v;

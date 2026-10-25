@@ -1028,12 +1028,14 @@ def ue_stamp(d):   # what an extraction's decoded shader archives were made from
 
 
 def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
-    """A game with Unreal paks (Octopath Traveler 0): Unreal Engine keeps its shaders in the shader code archives of its paks, each shader Oodle-compressed, and only the game's own Oodle
-    decodes them. dm/gfx/tools/uepak.py takes the archives out of the paks (the pak index is AES-encrypted with a key from main) and writes one Oodle job; the game's code decodes it in the Mac host
-    (DM_OODLE_JOB, dm/host/hle_oodle.c: right before nnMain, then the host exits), and the decoded archives go to <version dir>/ue_shaders, where shader_split.py reads them.
-    The job runs the packed version's code (Oodle's format does not change between builds). Unreal Engine 4.26 and later compress shaders with LZ4 by default (DRAGON QUEST VII Reimagined),
-    which uepak.py decodes itself, so such a game needs no host run here. Unreal Engine 5.6 (FINAL FANTASY RESONANCE) keeps its shader libraries in the IoStore container instead, two layers
-    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its paks is reused"""
+    """Prepare Unreal shader archives when the pak carries them.
+
+    Archive-based games are decoded through their own Oodle as before. Some
+    version-11 paks instead keep zlib-compressed LSLG records inline in
+    GlobalShaderCache and cooked .uexp files; shader_split.py scans those
+    directly, so this stage only records an empty archive stamp for them.
+    A folder whose stamp matches its paks is reused.
+    """
     sys.path.insert(0, str(repo / 'dm/gfx/tools')); import uepak
     todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == ue_stamp(d))}
     PROG.stage('UE shader decode')
@@ -1055,7 +1057,11 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
         try: listing, n = uepak.job(str(d / 'RomFS'), str(d / 'ExeFS/main'), str(jd), decode=dec)
         finally:
             if dec: dec.close()
-        if not listing: raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive: where the shaders are has to be found first')
+        if not listing:
+            inline = uepak.inline_shader_paks(str(d / 'RomFS'))
+            if not inline:
+                raise BuildError(f'the RomFS has Unreal paks, but none under {d / "RomFS"} holds a shader code archive or inline shader records')
+            say(f'{v}: {len(inline)} Unreal pak(s) keep shaders inline in GlobalShaderCache/.uexp; shader_split.py will scan them directly')
         say(f'{v}: ' + '; '.join(f'{x["name"]} {x["shaders"]:,} shaders' + (f' ({x["compression"]})' if x.get('compression') else '') for x in listing)
             + (f'; decoding {n:,} with the game\'s Oodle in the Mac host' if n else ''))
         if n:   # Oodle-compressed shaders (Octopath Traveler 0); LZ4 ones (Unreal Engine 4.26 and later by default) are decoded by uepak.py already
