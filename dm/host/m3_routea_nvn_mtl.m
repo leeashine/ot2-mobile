@@ -68,7 +68,7 @@
 #include "tex/nvn_bcdec.h"
 /* D2R-only embedded shader bodies are intentionally excluded from this port. */
 #include "nvn/nvn_dirty.h"
-#include "nvn/nvn_refl.h"
+#include "m3_routea_nvn_refl.h"
 #include "nvn/nvn_cover.h"
 #include "nvn/nvn_hmap.h"
 #include "dm.h"
@@ -5371,7 +5371,7 @@ static inline int ot2_tex_slot(int reg) {
 
 static int encode_args(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, int metal_vertex) {
     if (!sh->ae) return 1;
-    uint64_t slots[NVN_REFL_MAXB] = {0};
+    uint64_t slots[NVN_REFL_MAXARG] = {0};
     args_sync_dirty();
     if (!passdump() && !g_args_dirty[nvn_stage] && sh->ab_buf && sh->ab_pass == g_pass.serial && nvn_stage != 5) {
         bind_args(en, nvn_stage, metal_vertex, sh->ab_buf, sh->ab_gpu, sh->ab_off, sh->rf.abi);

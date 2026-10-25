@@ -42,6 +42,13 @@ Copyright (c) 2026 seedds; MIT.
 `dm/gfx/nvn/hle_nvn.c` at `9393b00ea9aca52d9254214da93738f26582562f`.
 Original copyright (c) 2026 jhaizhou; MIT text below applies.
 
+`dm/host/m3_routea_nvn_refl.h` preserves the inline-constant reflection layout
+from `d2r-mobile/dm/gfx/nvn/nvn_refl.h` at
+`9393b00ea9aca52d9254214da93738f26582562f`, with binding/argument capacities
+raised to 192. It is shared by the classic parser and replay implementation;
+it does not import the current gfx header's dynamically owned constant pointer.
+Original copyright (c) 2026 jhaizhou; the MIT text below applies.
+
 Distributors of this source or a resulting binary must preserve the following
 notice.
 

@@ -27,7 +27,7 @@ M3_NVN_SRC = m3_routea_hle_nvn.c m3_routea_nvn_mtl.m \
 	$(M3_GFX_DIR)/tex/nvn_bcdec.c $(M3_GFX_DIR)/nvn/nvn_thunks.S \
 	$(M3_GFX_DIR)/nvn/nvn_entry.S
 GFX=$(sort $(wildcard ../gfx/*.c)) $(M3_NVN_SRC)
-GFX_H=$(sort $(wildcard $(M3_GFX_DIR)/*.h $(M3_GFX_DIR)/nvn/*.h $(M3_GFX_DIR)/nvn/include/*.h $(M3_GFX_DIR)/tex/*.h $(M3_GFX_DIR)/../gthread.h) $(M3_GFX_DIR)/third_party/bcdec/bcdec.h)
+GFX_H=$(sort $(wildcard $(M3_GFX_DIR)/*.h $(M3_GFX_DIR)/nvn/*.h $(M3_GFX_DIR)/nvn/include/*.h $(M3_GFX_DIR)/tex/*.h $(M3_GFX_DIR)/../gthread.h) $(M3_GFX_DIR)/third_party/bcdec/bcdec.h) m3_routea_nvn_refl.h
 GFX_INC=-I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/.. -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include
 M3_HOST_SRC=m3_routea_bridge.c
 else

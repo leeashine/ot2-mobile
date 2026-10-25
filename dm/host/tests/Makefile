@@ -39,10 +39,10 @@ run: $(B)/t_uemalloc
 run: $(OT2_MEMORY_TEST)
 run: $(M3_BINDING_TEST)
 run: $(M3_SNAPSHOT_TEST)
-$(B)/t_m3_snapshot: t_m3_snapshot.m t_m3_snapshot_hle.c t_m3_runtime_stubs.h ../m3_routea_hle_nvn.c ../m3_routea_nvn_mtl.m $(GAME_H) | $(B)
+$(B)/t_m3_snapshot: t_m3_snapshot.m t_m3_snapshot_hle.c t_m3_runtime_stubs.h ../m3_routea_hle_nvn.c ../m3_routea_nvn_mtl.m ../m3_routea_nvn_refl.h $(GAME_H) | $(B)
 	@test -n "$(M3_GFX_DIR)" || (echo "set M3_GFX_DIR to the classic-Metal gfx snapshot"; exit 1)
 	clang -arch arm64 -O1 -g -fobjc-arc -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0 $(GINC) -I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include -Wno-deprecated-declarations -Wno-format -o $@ t_m3_snapshot.m t_m3_snapshot_hle.c -framework Cocoa -framework QuartzCore -framework Metal -framework ImageIO -framework UniformTypeIdentifiers -Wl,-dead_strip -Wl,-undefined,dynamic_lookup
-$(B)/t_m3_program_binding: t_m3_program_binding.m ../m3_routea_nvn_mtl.m $(GAME_H) | $(B)
+$(B)/t_m3_program_binding: t_m3_program_binding.m ../m3_routea_nvn_mtl.m ../m3_routea_nvn_refl.h $(GAME_H) | $(B)
 	@test -n "$(M3_GFX_DIR)" || (echo "set M3_GFX_DIR to the classic-Metal gfx snapshot"; exit 1)
 	clang -arch arm64 -O1 -g -fobjc-arc -DDM_NVN_M3=1 -DDM_ROUTE_A_GFX=1 -mmacosx-version-min=15.0 $(GINC) -I$(M3_GFX_DIR) -I$(M3_GFX_DIR)/nvn -I$(M3_GFX_DIR)/nvn/include -Wno-deprecated-declarations -Wno-format -o $@ $< -framework Cocoa -framework QuartzCore -framework Metal -framework ImageIO -framework UniformTypeIdentifiers -Wl,-dead_strip -Wl,-undefined,dynamic_lookup
 $(B)/t_ot2_memory_budget: t_ot2_memory_budget.c ../hle_svc.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_H) | $(B)

@@ -123,9 +123,23 @@ Bring-up discipline: when one subproblem produces no substantive convergence for
 
 Before and during future runs, keep available disk above 9 GiB; do not start, or stop owned game processes, at or below that threshold. Disable periodic frame capture (`OT2_NVN_CAPTURE_EVERY=0`); use at most 16 explicit `DM_NVN_SHOT` frames and at most four manual shots per run. Keep key evidence, compress completed large logs, and remove completed private `temp/` directories without touching saves, shared caches or other sessions' files.
 
+### Reflection argument capacity
+
+The fixed 64-record reflection limit rejected a locally observed fragment shader
+with 66 argument-buffer bindings before PSO creation. Both reflection parsers
+now accept up to 192 records, matching the argument-slot capacity; the classic
+Metal encoder sizes its slot array for those 192 argument IDs. This is not a
+change to Metal's direct-binding or unique-sampler hardware limits.
+
+The classic parser and replay share `m3_routea_nvn_refl.h`, preserving their
+inline 4-KiB constant segment. The current gfx header instead owns a constant
+pointer and must not be substituted for that layout. Synthetic regression
+checks cover 66/192 accepted and over-capacity rejection; a separate local smoke
+fed the actual 66-binding reflection to the classic parser successfully.
+
 ## Known gaps
 
-- The observed uniform-purple and whole-screen-blur failures are resolved, and movement/main-menu input is verified in the tavern. Combat, extended exploration, full rendering correctness and rebuilt-cache coverage in later scenes remain unverified.
+- Village traversal, the first Forest Path battle, and cold-start reload of a manual save are verified in single samples. Rebuilding the observed missing shaders removed the enemy/Gus black rectangles, but later effects exposed additional shader/geometry gaps; extended exploration and full rendering correctness remain unverified.
 - Unmatched/general geometry shaders are still unsupported; only the metadata-verified slice operation is folded into the vertex stage.
 
 ## Before open-source release

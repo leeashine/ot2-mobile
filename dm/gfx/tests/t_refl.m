@@ -19,6 +19,12 @@ static NSDictionary *load(const char *key) {
     if (!d) { printf("SKIP: no reflection sample %s (the samples are translated shaders of Super Mario Bros. Wonder in the NSP script's build cache; DM_ROOT or ~/dm-work/build/cache/metal_shader_cache), the checks on it do not run\n", p.UTF8String); skipped++; return nil; }
     return [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
 }
+static NSDictionary *synthetic_support_reflection(NSUInteger count) {
+    NSMutableArray *bindings = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger i = 0; i < count; i++)
+        [bindings addObject:@{@"kind": @"support", @"arg_id": @(i)}];
+    return @{@"route": @"B", @"bindings": bindings};
+}
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
@@ -69,6 +75,24 @@ int main(void) { @autoreleasepool {
         check("B handle array: texture kind", NVN_RB_TEXU, r.b[2].kind); check("B handle array: texture n", 32, r.b[2].n); check("B handle array: texture dummy type 2D", 2, r.b[2].dtt); check("B handle array: texture slot", 11, r.b[2].reg);
         check("B handle array: sampler kind", NVN_RB_SAMPU, r.b[3].kind); check("B handle array: sampler n", 32, r.b[3].n); check("B handle array: bindless", 1, r.bindless);
         printf("%-60s %s\n", "B array of 32 handles in uniform slot 11 (texture + sampler)", fail == f1 ? "✓" : "✗");
+    }
+    {   int f1 = fail;
+        NSDictionary *j66 = synthetic_support_reflection(66);
+        int result = nvn_refl_from_json(j66, &r, err, sizeof err);
+        check("B 66 bindings: conversion succeeds", 0, result);
+        if (!result) {
+            check("B 66 bindings: count", 66, r.nb);
+            check("B 66 bindings: last argument index", 65, r.b[65].aid);
+        }
+
+        NSDictionary *jmax = synthetic_support_reflection(NVN_REFL_MAXB);
+        check("B max bindings: conversion succeeds", 0, nvn_refl_from_json(jmax, &r, err, sizeof err));
+        check("B max bindings: count", NVN_REFL_MAXB, r.nb);
+        check("B max bindings: last argument index", NVN_REFL_MAXARG - 1, r.b[NVN_REFL_MAXB - 1].aid);
+
+        NSDictionary *joverflow = synthetic_support_reflection(NVN_REFL_MAXB + 1);
+        check("B over-capacity binding count fails", 1, nvn_refl_from_json(joverflow, &r, err, sizeof err) != 0);
+        printf("%-60s %s\n", "B reflection capacity: 66 and 192 accepted; 193 rejected", fail == f1 ? "✓" : "✗");
     }
     {   int f1 = fail;
         NSDictionary *b1 = @{@"route": @"B", @"bindings": @[@{@"kind": @"foo", @"arg_id": @0, @"msl_name": @"x", @"msl_type": @"constant _16*"}]};

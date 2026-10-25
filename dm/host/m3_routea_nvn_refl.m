@@ -1,7 +1,7 @@
 // Source: d2r-mobile/dm/gfx/nvn/nvn_refl.m; commit 9393b00ea9aca52d9254214da93738f26582562f; MIT.
 // OT2 adaptation: normalize translator texture registers 128..255 to NVN BindTextures slots 0..127.
-// 着色器反射 json（B：Switch 原版翻译，tools/dmsh_build.py 出）→ 定长 C 数组（nvn_refl.h）
-#import "nvn/nvn_refl.h"
+// 着色器反射 json（B：Switch 原版翻译，tools/dmsh_build.py 出）→ 定长 C 数组（m3_routea_nvn_refl.h）
+#import "m3_routea_nvn_refl.h"
 #import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
