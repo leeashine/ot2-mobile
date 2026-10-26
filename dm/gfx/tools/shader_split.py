@@ -1261,9 +1261,8 @@ def ue_inline_names(pak):
 def ue_inline_jobs(files, parts=64):
     """Inline-shader Unreal paks split into roughly equal scan jobs.
 
-    Version 4 uses per-file entries and LZ5 (DRAGON QUEST XI S). Version 11
-    uses the encoded index and may still keep shaders in zlib-compressed
-    GlobalShaderCache/.uexp files (Octopath Traveler II).
+    Version 11 paks use the encoded index and can keep compact LZ4 LSLG records
+    or legacy zlib records inline in GlobalShaderCache/.uexp (Octopath Traveler II).
     """
     paks = []
     for path, rel in files:
@@ -1300,9 +1299,13 @@ def ue_inline_jobs(files, parts=64):
 
 _PAKS = {}
 def ue_inline_pak_shaders(path, rel, names, out):
-    """Decode and scan cooked files from an inline-shader Unreal pak."""
+    """Recover compact NVN records from Unreal .uexp and GlobalShaderCache entries."""
     import zlib
+    from ot2_uexp_static import extract_compact_lslg_shaders
+
     pak = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
+    stats = collections.Counter()
+    static_keys = set()
     for name in names:
         entry = pak.entry(name)
         method = entry['method'].lower()
@@ -1318,7 +1321,29 @@ def ue_inline_pak_shaders(path, rel, names, out):
             decode = oodle
         data = pak.read(name, decode=decode)
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pak.mount + name))
-        ue_inline_shaders(data, f'/{rel}#{label}', out)
+        source = f'/{rel}#{label}'
+        base_name = os.path.basename(name).lower()
+        if (name.lower().endswith('.uexp')
+                or base_name.startswith('globalshadercache-') and base_name.endswith('.bin')):
+            found, file_stats = extract_compact_lslg_shaders(data, source)
+            out.extend(found)
+            stats.update(file_stats)
+            static_keys.update(skey(row[2], row[3]) for row in found)
+        ue_inline_shaders(data, source, out)
+    if stats['flag01'] or stats['flag00'] or stats['rejected']:
+        print(f'Unreal compact LZ4: records {stats["records"]:,}; flag 00 01 {stats["flag01"]:,}; recovered {stats["decoded"]:,}; '
+              f'flag 00 00 skipped {stats["flag00"]:,}; rejected {stats["rejected"]:,}', flush=True)
+    report_dir = os.environ.get('DM_OT2_UE_STATIC_STATS_DIR')
+    if report_dir and stats['records']:
+        import hashlib
+        os.makedirs(report_dir, exist_ok=True)
+        token = hashlib.sha256((rel + '\0' + '\0'.join(names)).encode()).hexdigest()[:16]
+        report = os.path.join(report_dir, f'{token}-{os.getpid()}.json')
+        temporary = report + '.tmp'
+        with open(temporary, 'w') as stream:
+            json.dump({'stats': dict(stats), 'keys': sorted(static_keys)}, stream, sort_keys=True)
+            stream.write('\n')
+        os.replace(temporary, report)
 
 ZLIB_HEAD = re.compile(b'\x78[\x01\x5e\x9c\xda]')
 def ue_inline_shaders(d, label, out):
@@ -1636,6 +1661,27 @@ def uniq_keys(found):
         if key in uniq and not same_shader(uniq[key][2:4], (ctl, code)): red(f'key {key} is the same but the control section or code area differs ({where})')
         uniq.setdefault(key, (where, st, ctl, code))
     return uniq
+def merge_nvn_captures(keys, directories):
+    """Merge validated runtime captures into static shaders by content key."""
+    import nvn_capture_split
+
+    pairs, accepted_keys, rejected, added = set(), set(), 0, 0
+    for directory in directories:
+        shaders, observed_pairs, bad = nvn_capture_split.collect(directory)
+        pairs |= observed_pairs
+        rejected += bad
+        for key, shader in shaders.items():
+            row = (shader['source'], shader['stage'], shader['control'], shader['code'])
+            old = keys.get(key)
+            if old:
+                if old[1] != row[1] or not same_shader(old[2:4], row[2:4]):
+                    red(f'NVN capture key {key} conflicts with {old[0]} ({row[0]})')
+            else:
+                keys[key] = row
+                added += 1
+            accepted_keys.add(key)
+    return pairs, len(accepted_keys), rejected, added
+
 
 def nso_image(path):
     import lz4.block
@@ -1718,6 +1764,13 @@ def main():
                 if not same_shader(keys[key][2:4], v[2:4]): red(f'key {key} is the same but the control section or code area differs ({v[0]} / {keys[key][0]})')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    capture_dirs = [p for p in os.environ.get('DM_NVN_CAPTURE_DIR', '').split(os.pathsep) if p]
+    if capture_dirs:
+        capture_pairs, captured, rejected, added = merge_nvn_captures(keys, capture_dirs)
+        pairs |= capture_pairs
+        if added:
+            per_src['other'] += added
+        print(f'NVN runtime captures: {captured:,} unique valid; {added:,} added to static set; {rejected:,} rejected', flush=True)
     sp, cover = separable_pairs(keys); pairs |= sp
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)

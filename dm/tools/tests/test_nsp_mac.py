@@ -125,10 +125,10 @@ class EnvFile(Base):
 
 
 class NvnCapturePlan(unittest.TestCase):
-    def test_profile_gated_capture_only_follows_an_empty_nvn_split(self):
-        self.assertEqual(nsp.nvn_capture_plan('nvn', True, True, False), 'capture')
-        self.assertEqual(nsp.nvn_capture_plan('nvn', True, False, False), 'static')
-        self.assertEqual(nsp.nvn_capture_plan('nvn', False, True, False), 'static')
+    def test_first_build_captures_without_complete_snapshots(self):
+        self.assertEqual(nsp.nvn_capture_plan('nvn', True, False, False), 'capture')
+        self.assertEqual(nsp.nvn_capture_plan('nvn', True, True, False), 'static')
+        self.assertEqual(nsp.nvn_capture_plan('nvn', False, False, False), 'static')
         self.assertEqual(nsp.nvn_capture_plan('nvn', True, False, True), 'merge')
         with self.assertRaises(nsp.BuildError): nsp.nvn_capture_plan('nvn', False, False, True)
     def test_capture_more_is_a_cli_option(self):

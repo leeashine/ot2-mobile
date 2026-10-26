@@ -4,8 +4,8 @@
 #   → split out the shaders and check them against the profile's tables (shader_split.py) (a Vulkan game without SPIR-V files, Super Mario Galaxy, boots the same way to capture the SPIR-V shaders it generates;
 #   a game with Trinity packs, Pokémon Legends: Z-A, has them decoded for the split by its own Oodle decoder, run in the Mac host's tool mode)
 #   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A Vulkan game (main imports Vulkan, not NVN: Hades) skips the NVN shader steps: vk_shaders.py translates its SPIR-V shaders instead.
-# Most shader-source steps follow the game's files (dm/games/profile_guess.py shader_sources). An NVN profile can explicitly set nvn_capture=on: if its static split reports zero, the script headlessly captures ProgramSetShaders;
-#   --capture-more rebuilds that package from complete local captures without the NVN capture boot. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
+# Most shader-source steps follow the game's files (dm/games/profile_guess.py shader_sources). An NVN profile with nvn_capture=on headlessly captures ProgramSetShaders when no complete local snapshots exist, even if static extraction found shaders, then merges them by content key;
+#   --capture-more merges the static split with complete local captures without booting. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
 #   the survey (<NSP folder>/<title ID>_build/profile/<title ID>/, outside the repository, found through DM_GAMES_DIR) and a best-effort IPA that may not boot; SURVEY_ONLY / --survey-only stops after the survey.
 # PLATFORM = 'mac' / --platform mac is a development option (the Mac is the development host, not a platform for players): the same steps up to the shaders, but only the Mac's
 #   (the shader build without IOSOUT, a Vulkan or GL game's libraries without --ios), then the Mac host for the profile and the button-icon font; no iOS shaders, Xcode project or IPA.
@@ -1109,12 +1109,12 @@ def nvn_capture_keys_end_seconds(spec):
     return last + 1.0
 
 
-def nvn_capture_plan(gfx, declared, static_empty, capture_more):
+def nvn_capture_plan(gfx, declared, captures_available, capture_more):
     if capture_more:
         if gfx != 'nvn' or not declared:
             raise BuildError('--capture-more requires an NVN profile with nvn_capture=on')
         return 'merge'
-    return 'capture' if gfx == 'nvn' and declared and static_empty else 'static'
+    return 'capture' if gfx == 'nvn' and declared and not captures_available else 'static'
 
 
 def nvn_capture_complete(directory):
@@ -1259,7 +1259,7 @@ def isolate_nvn_capture_profile(g, work, env):
 
 
 def capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, auto_boot):
-    """Use existing captures for --capture-more; only the zero-static fallback boots a headless Mac host."""
+    """Reuse captures for --capture-more; on the first NVN build without complete snapshots, boot headlessly even when static shaders exist."""
     pending = Path(work) / 'shaders/pending'
     complete = nvn_capture_complete(pending)
     if auto_boot and not complete:
@@ -1302,6 +1302,7 @@ def capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, 
     elif complete:
         say(f'reusing {len(complete)} complete NVN shader snapshots from {pending}')
     key = build_nvn_capture_package(repo, py, work, env, logs, g)
+    env['DM_NVN_CAPTURE_DIR'] = str(pending)
     return key
 
 
@@ -1491,20 +1492,45 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     are as at the last successful split. Returns the package's content key, the iOS shaders' input (None for a provisional profile or damaged files, which never reuse them): a split that runs
     again because a reader of another engine changed writes the same package, and the iOS shaders stay reused.
     oodle: for a game with Trinity packs (Pokémon Legends: Z-A; profile_guess.py shader_sources), a function that builds the Mac host and returns the split's DM_OODLE_HOST / DM_OODLE_MODULES; called only when the split runs.
-    allow_empty: returns False after removing the partial output only when the split explicitly reports zero shaders, for the opt-in NVN capture fallback."""
+    allow_empty: permits a zero-result split only for a profile that will collect runtime NVN captures."""
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     PROG.stage('shader split', step='checking the inputs')   # then a spinner: shader_split.py writes the package and the tables only at the end
     kf = pkg.with_name(pkg.name + '.key')
-    key = None if provisional or ALLOW_DAMAGED else fingerprint(('files', tool_files(repo)), ('files', profile_files(g)),
+    capture_roots = [Path(p) for p in env.get('DM_NVN_CAPTURE_DIR', '').split(os.pathsep) if p]
+    capture_inputs = [('tree', p) for p in capture_roots]
+    key = None if provisional or ALLOW_DAMAGED else fingerprint(
+        ('files', tool_files(repo)), ('files', profile_files(g)),
         *[x for r, m in zip(roms, mains) for x in (('files', [m]), ('tree', r), ('files', sorted((r.parent / 'glslc_capture').glob('*.glslc'))),
-                                                   ('files', sorted((r.parent / 'ue_shaders').glob('*.ushaderbytecode'))))])
+                                                   ('files', sorted((r.parent / 'ue_shaders').glob('*.ushaderbytecode'))))],
+        *capture_inputs)
     if key and pkg.is_dir() and (note := reused(kf, key)) is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return package_key(pkg)
     if oodle:   # the packs are decoded by the game's own Oodle in the Mac host (dm/host/hle_oodle.c)
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
     PROG.set(step='splitting')
+    stats_dir = Path(logs) / 'unreal_static_parts'
+    split_env = dict(env)
+    rmtree(stats_dir); stats_dir.mkdir(parents=True)
+    split_env['DM_OT2_UE_STATIC_STATS_DIR'] = str(stats_dir)
+    summary_path = Path(logs) / 'unreal_static_summary.json'
+    try: summary_path.unlink()
+    except FileNotFoundError: pass
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_split.log', env=env)
+    try:
+        run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_split.log', env=split_env)
+    finally:
+        totals = collections.Counter()
+        compact_keys = set()
+        for report in stats_dir.glob('*.json'):
+            result = json.loads(report.read_text())
+            totals.update(result.get('stats', {}))
+            compact_keys.update(result.get('keys', []))
+        if totals:
+            summary = dict(totals)
+            summary['unique_keys'] = len(compact_keys)
+            summary_path.write_text(json.dumps(summary, sort_keys=True, indent=2) + '\n')
+            say(f'Unreal compact static: {len(compact_keys):,} unique keys; {totals["decoded"]:,} decoded records; '
+                f'{totals["flag00"]:,} external-history records skipped; {totals["rejected"]:,} rejected')
     m = re.search(r'shaders: (\d+) \(', (logs / 'shader_split.log').read_text(errors='replace'))
     if m and m.group(1) == '0':
         if allow_empty:
@@ -1993,22 +2019,36 @@ def main(args=None):
             profile_id = g.id
             g = gamemod.load(profile_id)
             if Path(g.dir).resolve() != profile_dir.resolve(): raise BuildError(f'NVN runtime profile did not take priority: {g.dir}')
+            own = True
             PROG.stage('NVN capture merge', step='using complete local captures; no NVN game boot')
-            pkey = capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, auto_boot=False)
+            capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, auto_boot=False)
             PROG.end(f'{len(nvn_capture_complete(work / "shaders/pending")):,} complete NVN captures')
-        else:
+            PROG.add(1)
             pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv],
-                                 sh / 'pkg', env, logs, g, own, oodle, allow_empty=nvn_capture_enabled)
-            plan = nvn_capture_plan(gfx, nvn_capture_enabled, pkey is False, False)
-            if plan == 'capture':
+                                 sh / 'pkg', env, logs, g, own, oodle)
+        else:
+            if nvn_capture_enabled:
                 profile_dir = isolate_nvn_capture_profile(g, work, env)
                 profile_id = g.id
                 g = gamemod.load(profile_id)
                 if Path(g.dir).resolve() != profile_dir.resolve(): raise BuildError(f'NVN runtime profile did not take priority: {g.dir}')
+                own = True
+                pending = work / 'shaders/pending'
+                if nvn_capture_complete(pending):
+                    env['DM_NVN_CAPTURE_DIR'] = str(pending)
+                else:
+                    env.pop('DM_NVN_CAPTURE_DIR', None)
+            pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv],
+                                 sh / 'pkg', env, logs, g, own, oodle, allow_empty=nvn_capture_enabled)
+            plan = nvn_capture_plan(gfx, nvn_capture_enabled, bool(env.get('DM_NVN_CAPTURE_DIR')), False)
+            if plan == 'capture':
                 PROG.add(1)
-                PROG.stage('NVN runtime capture', step='headless boot after an empty static split')
-                pkey = capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, auto_boot=True)
+                PROG.stage('NVN runtime capture', step='headless boot to merge runtime shaders with the static split')
+                capture_nvn_shaders(repo, py, work, game, patched, aoc, lang, env, logs, g, auto_boot=True)
                 PROG.end(f'{len(nvn_capture_complete(work / "shaders/pending")):,} complete NVN captures')
+                PROG.add(1)
+                pkey = split_shaders(py, repo, [dirs[v] / 'RomFS' for v in sv], [dirs[v] / 'ExeFS/main' for v in sv],
+                                     sh / 'pkg', env, logs, g, own, oodle)
         ios = build_shaders(py, repo, sh, xlate, env, logs, g, pkey, mac)
     if mac:   # a Mac-only build ends with the Mac host and the command that runs the game
         cmd = mac_run(py, repo, work, game, patched, ios, aoc, gfx, lang, env, logs, g, args.env_file or DM_ENV_FILE)

@@ -21,10 +21,11 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x5000000
 
-shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_groups	GlobalShaderCache=global Majesty=game ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	OCTOPATH TRAVELER II shaders
 
-# Static shader splitting finds no usable records in the compact LSLG archives.
+# Static splitting recovers validated compact LSLG 00 01 records; 00 00 requires external history.
+# First NVN build captures headlessly when no complete snapshots exist, including when static shaders were found.
 nvn_capture	on
 
 # Bounded first-run prompts toward the title/New Game screen; DM_KEYS seconds start with the Mac host.
