@@ -1305,7 +1305,9 @@ def ue_inline_pak_shaders(path, rel, names, out):
 
     pak = _PAKS.get(path) or _PAKS.setdefault(path, uepak.Pak(path))
     stats = collections.Counter()
+    stats_by_kind = collections.defaultdict(collections.Counter)
     static_keys = set()
+    keys_by_kind = collections.defaultdict(set)
     for name in names:
         entry = pak.entry(name)
         method = entry['method'].lower()
@@ -1323,16 +1325,45 @@ def ue_inline_pak_shaders(path, rel, names, out):
         label = re.sub(r"^(\.\./)+", "", os.path.normpath(pak.mount + name))
         source = f'/{rel}#{label}'
         base_name = os.path.basename(name).lower()
-        if (name.lower().endswith('.uexp')
-                or base_name.startswith('globalshadercache-') and base_name.endswith('.bin')):
+        if name.lower().endswith('.uexp'):
+            kind = 'uexp'
+        elif base_name.startswith('globalshadercache-') and base_name.endswith('.bin'):
+            kind = 'gsc'
+        else:
+            kind = None
+        if kind:
             found, file_stats = extract_compact_lslg_shaders(data, source)
             out.extend(found)
             stats.update(file_stats)
-            static_keys.update(skey(row[2], row[3]) for row in found)
+            stats_by_kind[kind].update(file_stats)
+            file_keys = {skey(row[2], row[3]) for row in found}
+            static_keys.update(file_keys)
+            keys_by_kind[kind].update(file_keys)
         ue_inline_shaders(data, source, out)
-    if stats['flag01'] or stats['flag00'] or stats['rejected']:
-        print(f'Unreal compact LZ4: records {stats["records"]:,}; flag 00 01 {stats["flag01"]:,}; recovered {stats["decoded"]:,}; '
-              f'flag 00 00 skipped {stats["flag00"]:,}; rejected {stats["rejected"]:,}', flush=True)
+    if stats['records']:
+        summaries = []
+        for kind in ('uexp', 'gsc'):
+            current = stats_by_kind[kind]
+            if current['records']:
+                summaries.append(
+                    f'{kind}: {current["records"]:,} LSLG markers, '
+                    f'{current["decoded"]:,} decoded, {current["rejected"]:,} rejected '
+                    f'({current["ambiguous"]:,} ambiguous)')
+        failures = sorted(
+            (key.removeprefix('candidate_failure_'), count)
+            for key, count in stats.items()
+            if key.startswith('candidate_failure_'))
+        if failures:
+            summaries.append('candidate failures: ' + ', '.join(
+                f'{name}={count:,}' for name, count in failures))
+        rejects = sorted(
+            (key.removeprefix('rejected_reason_'), count)
+            for key, count in stats.items()
+            if key.startswith('rejected_reason_') and '_start_minus_' not in key)
+        if rejects:
+            summaries.append('rejected record reasons: ' + ', '.join(
+                f'{name}={count:,}' for name, count in rejects))
+        print('Unreal complete LZ4: ' + '; '.join(summaries), flush=True)
     report_dir = os.environ.get('DM_OT2_UE_STATIC_STATS_DIR')
     if report_dir and stats['records']:
         import hashlib
@@ -1340,8 +1371,14 @@ def ue_inline_pak_shaders(path, rel, names, out):
         token = hashlib.sha256((rel + '\0' + '\0'.join(names)).encode()).hexdigest()[:16]
         report = os.path.join(report_dir, f'{token}-{os.getpid()}.json')
         temporary = report + '.tmp'
+        report_data = {
+            'stats': dict(stats),
+            'by_kind': {kind: dict(values) for kind, values in stats_by_kind.items()},
+            'keys': sorted(static_keys),
+            'keys_by_kind': {kind: sorted(values) for kind, values in keys_by_kind.items()},
+        }
         with open(temporary, 'w') as stream:
-            json.dump({'stats': dict(stats), 'keys': sorted(static_keys)}, stream, sort_keys=True)
+            json.dump(report_data, stream, sort_keys=True)
             stream.write('\n')
         os.replace(temporary, report)
 

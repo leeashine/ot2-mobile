@@ -24,7 +24,7 @@ sys_resource	0x5000000
 shader_groups	GlobalShaderCache=global Majesty=game ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	OCTOPATH TRAVELER II shaders
 
-# Static splitting recovers validated compact LSLG 00 01 records; 00 00 requires external history.
+# Static splitting accepts complete u32-sized raw LZ4 blocks starting at LSLG-1/-2; external history is not used.
 # First NVN build captures headlessly when no complete snapshots exist, including when static shaders were found.
 nvn_capture	on
 

@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""Recover NVN shaders from UE 4.27 compact LSLG records in cooked .uexp files.
-
-The 00 01 record form is one dictionary-free LZ4 block beginning at record+1.
-Records with 00 00 flags need external history and are deliberately skipped.
-"""
+"""Recover validated NVN shaders from complete UE4.27 LZ4 blocks in cooked paks."""
 from collections import Counter
+import ctypes
+import ctypes.util
 import struct
 
 RECORD_MAGIC = b'LSLG'
-FLAG_LZ4 = b'\x00\x01'
-FLAG_EXTERNAL_HISTORY = b'\x00\x00'
 GFX_MAGIC = bytes.fromhex('78563412')
 CS_MAGIC = bytes.fromhex('79563412')
 CTL_MAGIC = bytes.fromhex('34127698')
 CONTROL_BYTES = 0x880
 MAX_DECODED_BYTES = 16 * 1024 * 1024
+MAX_LZ4_INPUT = (1 << 31) - 1
+_LZ4 = None
 
 
 def _length(src, pos, base):
@@ -31,45 +29,68 @@ def _length(src, pos, base):
     return length, pos
 
 
-def decode_lz4_block(src):
-    """Decode one raw LZ4 block without a dictionary.
-
-    Returns (output, consumed, reason). A partial output is retained on malformed
-    tails so the caller can accept only when the complete code and control regions
-    were already recovered and validated.
-    """
-    out = bytearray()
+def _lz4_output_size(src):
+    """Validate raw LZ4 block bounds and calculate its exact output capacity."""
+    if not src:
+        return None, 'empty_block'
+    size = 0
     pos = 0
     while pos < len(src):
         token = src[pos]
         pos += 1
         literals, pos = _length(src, pos, token >> 4)
-        if literals is None or pos + literals > len(src):
-            return bytes(out), pos, 'truncated_literals'
-        if len(out) + literals > MAX_DECODED_BYTES:
-            return bytes(out), pos, 'decoded_size_limit'
-        out.extend(src[pos:pos + literals])
+        if literals is None:
+            return None, 'truncated_literal_length'
+        if pos + literals > len(src):
+            return None, 'truncated_literals'
+        size += literals
         pos += literals
+        if size > MAX_DECODED_BYTES:
+            return None, 'decoded_size_limit'
         if pos == len(src):
-            return bytes(out), pos, 'end'
+            return size, None
         if pos + 2 > len(src):
-            return bytes(out), pos, 'truncated_offset'
+            return None, 'truncated_offset'
         offset = src[pos] | (src[pos + 1] << 8)
         pos += 2
-        if offset == 0 or offset > len(out):
-            return bytes(out), pos, 'invalid_offset'
+        if offset == 0 or offset > size:
+            return None, 'invalid_offset'
         match, pos = _length(src, pos, token & 0x0f)
         if match is None:
-            return bytes(out), pos, 'truncated_match_length'
-        match += 4
-        if len(out) + match > MAX_DECODED_BYTES:
-            return bytes(out), pos, 'decoded_size_limit'
-        for _ in range(match):
-            out.append(out[-offset])
-    return bytes(out), pos, 'end'
+            return None, 'truncated_match_length'
+        size += match + 4
+        if size > MAX_DECODED_BYTES:
+            return None, 'decoded_size_limit'
+    return size, None
 
 
-def _shader_from_decoded(decoded, stage_tag, label, record_offset, split):
+def _lz4_decompress_safe(src, output_size):
+    """Decode the exact compressed span with the platform's LZ4_decompress_safe."""
+    global _LZ4
+    if _LZ4 is None:
+        library_name = ctypes.util.find_library('lz4')
+        if not library_name:
+            raise RuntimeError('liblz4 is required to decode UE inline LZ4 blocks')
+        library = ctypes.CDLL(library_name)
+        function = library.LZ4_decompress_safe
+        function.argtypes = (ctypes.c_char_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int)
+        function.restype = ctypes.c_int
+        _LZ4 = (library, function)
+    if not 0 < output_size <= MAX_DECODED_BYTES or len(src) > MAX_LZ4_INPUT:
+        return None, 'invalid_output_size'
+    destination = ctypes.create_string_buffer(output_size)
+    written = _LZ4[1](src, destination, len(src), output_size)
+    if written < 0:
+        return None, 'invalid_lz4_block'
+    if written != output_size:
+        return None, 'lz4_output_size_mismatch'
+    return destination.raw[:written], None
+
+
+def _shader_from_decoded(decoded, label, block_start, split):
+    if decoded[:4] != RECORD_MAGIC:
+        return None, 'output_not_lslg'
+    stage_tag = decoded[4:6].decode('latin1')
     stage = split.UE_TAG.get(stage_tag)
     if not stage:
         return None, 'unknown_stage'
@@ -92,7 +113,7 @@ def _shader_from_decoded(decoded, stage_tag, label, record_offset, split):
                 if code[:4] in (GFX_MAGIC, CS_MAGIC):
                     why = split.check(label, stage, control, code)
                     if not why:
-                        return (f'{label}#UEXPLZ4@{record_offset:x}', stage, control, code), None
+                        return (f'{label}#UEXPLZ4@{block_start:x}', stage, control, code), None
         control_at = decoded.find(CTL_MAGIC, control_at + len(CTL_MAGIC))
     if not saw_control:
         return None, 'missing_control'
@@ -100,7 +121,7 @@ def _shader_from_decoded(decoded, stage_tag, label, record_offset, split):
 
 
 def extract_compact_lslg_shaders(data, label):
-    """Return validated compact Unreal LSLG shader records and scan counts."""
+    """Scan source bytes for LSLG and decode the exact preceding u32-sized LZ4 block."""
     import shader_split as split
 
     starts = []
@@ -114,36 +135,63 @@ def extract_compact_lslg_shaders(data, label):
 
     stats = Counter(records=len(starts))
     shaders = []
-    for index, start in enumerate(starts):
-        if start + 8 > len(data):
-            stats['truncated_headers'] += 1
-            continue
-        flags = data[start + 6:start + 8]
-        if flags == FLAG_EXTERNAL_HISTORY:
-            stats['flag00'] += 1
-            continue
-        if flags != FLAG_LZ4:
-            stats['other_flags'] += 1
-            continue
+    for lslg_offset in starts:
+        candidates = []
+        candidate_failures = []
+        for delta in (1, 2):
+            block_start = lslg_offset - delta
+            reason = None
+            if block_start < 4:
+                reason = 'missing_length_header'
+            else:
+                compressed_size = struct.unpack_from('<I', data, block_start - 4)[0]
+                if (not compressed_size or compressed_size > MAX_LZ4_INPUT
+                        or compressed_size > len(data) - block_start):
+                    reason = 'invalid_compressed_length'
+                else:
+                    compressed = data[block_start:block_start + compressed_size]
+                    output_size, detail = _lz4_output_size(compressed)
+                    if detail:
+                        reason = 'decoded_size_limit' if detail == 'decoded_size_limit' else 'lz4_invalid_block'
+                        if reason == 'lz4_invalid_block':
+                            stats[f'candidate_lz4_detail_{detail}'] += 1
+                    elif output_size < len(RECORD_MAGIC):
+                        reason = 'invalid_output_size'
+                    else:
+                        decoded, detail = _lz4_decompress_safe(compressed, output_size)
+                        if detail:
+                            reason = detail
+                        elif decoded[:4] != RECORD_MAGIC:
+                            reason = 'output_not_lslg'
+                        else:
+                            shader, detail = _shader_from_decoded(
+                                decoded, label, block_start, split)
+                            if detail:
+                                reason = f'shader_{detail}'
+                            else:
+                                candidates.append((shader, delta))
+            if reason:
+                stats[f'candidate_failure_{reason}'] += 1
+                candidate_failures.append(reason)
+            else:
+                stats[f'candidate_success_start_minus_{delta}'] += 1
 
-        stats['flag01'] += 1
-        end = starts[index + 1] if index + 1 < len(starts) else len(data)
-        # The verified record reader includes the next eight-byte LSLG header as
-        # the LZ4 boundary tail; decoding stops at its invalid back-reference.
-        compressed = data[start + 1:min(len(data), end + 8)]
-        decoded, _, stop_reason = decode_lz4_block(compressed)
-        stats[f'decode_{stop_reason}'] += 1
-        shader, error = _shader_from_decoded(
-            decoded, data[start + 4:start + 6].decode('latin1'), label, start, split)
-        if error:
+        if len(candidates) == 1:
+            shader, delta = candidates[0]
+            shaders.append(shader)
+            stats['decoded'] += 1
+            stats[f'recovered_start_minus_{delta}'] += 1
+        elif len(candidates) > 1:
             stats['rejected'] += 1
-            stats[error] += 1
-            continue
-        shaders.append(shader)
-        stats['decoded'] += 1
-        if stop_reason != 'end':
-            stats['valid_with_trailing_boundary'] += 1
-            stats[f'trailing_{stop_reason}'] += 1
-    for key in ('flag00', 'flag01', 'other_flags', 'truncated_headers', 'decoded', 'rejected'):
+            stats['ambiguous'] += 1
+        else:
+            stats['rejected'] += 1
+            if len(set(candidate_failures)) == 1:
+                stats[f'rejected_reason_{candidate_failures[0]}'] += 1
+            else:
+                stats['rejected_reason_mixed'] += 1
+                for delta, reason in zip((1, 2), candidate_failures):
+                    stats[f'rejected_reason_start_minus_{delta}_{reason}'] += 1
+    for key in ('decoded', 'rejected', 'ambiguous'):
         stats.setdefault(key, 0)
     return shaders, dict(stats)

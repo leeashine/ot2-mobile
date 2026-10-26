@@ -1520,17 +1520,31 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_split.log', env=split_env)
     finally:
         totals = collections.Counter()
+        totals_by_kind = collections.defaultdict(collections.Counter)
         compact_keys = set()
+        keys_by_kind = collections.defaultdict(set)
         for report in stats_dir.glob('*.json'):
             result = json.loads(report.read_text())
             totals.update(result.get('stats', {}))
             compact_keys.update(result.get('keys', []))
+            for kind, values in result.get('by_kind', {}).items():
+                totals_by_kind[kind].update(values)
+                keys_by_kind[kind].update(result.get('keys_by_kind', {}).get(kind, []))
         if totals:
             summary = dict(totals)
             summary['unique_keys'] = len(compact_keys)
+            summary['by_kind'] = {
+                kind: {**dict(values), 'unique_keys': len(keys_by_kind[kind])}
+                for kind, values in totals_by_kind.items()
+            }
             summary_path.write_text(json.dumps(summary, sort_keys=True, indent=2) + '\n')
-            say(f'Unreal compact static: {len(compact_keys):,} unique keys; {totals["decoded"]:,} decoded records; '
-                f'{totals["flag00"]:,} external-history records skipped; {totals["rejected"]:,} rejected')
+            by_kind = '; '.join(
+                f'{kind}: {values["decoded"]:,}/{values["records"]:,} decoded, '
+                f'{values["rejected"]:,} rejected, {len(keys_by_kind[kind]):,} keys'
+                for kind, values in sorted(totals_by_kind.items()))
+            say(f'Unreal complete LZ4 static: {len(compact_keys):,} unique keys; '
+                f'{totals["decoded"]:,}/{totals["records"]:,} records decoded; '
+                f'{totals["rejected"]:,} rejected; {by_kind}')
     m = re.search(r'shaders: (\d+) \(', (logs / 'shader_split.log').read_text(errors='replace'))
     if m and m.group(1) == '0':
         if allow_empty:

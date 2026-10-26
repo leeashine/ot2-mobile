@@ -28,7 +28,17 @@ def lz4_literal_block(data):
     return bytes(encoded)
 
 
-def compact_uexp_record(stage=b'SV', flags=b'\0\1'):
+def lz4_block_at_lslg(payload, delta):
+    if delta == 1:
+        assert payload[8:12] == bytes(4)
+        return b'\x80' + payload[:8] + b'\x01\x00' + lz4_literal_block(payload[12:])
+    if delta == 2:
+        assert payload[15:19] == bytes(4)
+        return b'\xf0\x00' + payload[:15] + b'\x01\x00' + lz4_literal_block(payload[19:])
+    raise ValueError('LSLG offset must be one or two bytes')
+
+
+def compact_uexp_record(stage=b'SV', lslg_delta=2):
     code = bytearray(0x80)
     code[:4] = shader_split.GFX_MAGIC
     stage_type = {b'SV': 1, b'SP': 5}[stage]
@@ -37,40 +47,52 @@ def compact_uexp_record(stage=b'SV', flags=b'\0\1'):
     control[:4] = shader_split.CTL_MAGIC
     struct.pack_into('<I', control, 0x20, len(control))
     struct.pack_into('<I', control, 0x704, len(code))
-    payload = bytes(code) + struct.pack('<I', len(code)) + bytes(control) + b'!!NVfp5.0\nEND'
-    # The block begins at record +1. Its first token is the 'S' of LSLG.
-    # The two flag bytes double as a one-byte-offset LZ4 match.
-    return b'LSLG' + stage + flags + b'\0' + lz4_literal_block(payload)
+    prefix = b'LSLG' + stage + bytes(2)
+    padding = bytes(4) if lslg_delta == 1 else bytes(7) + bytes(4)
+    payload = (prefix + padding + bytes(code) + struct.pack('<I', len(code))
+               + bytes(control) + b'!!NVfp5.0\nEND')
+    block = lz4_block_at_lslg(payload, lslg_delta)
+    return struct.pack('<I', len(block)) + block
 
 
 def test_compact_uexp():
-    record = compact_uexp_record()
-    found, stats = ot2_uexp_static.extract_compact_lslg_shaders(record, '/compact.uexp')
-    assert len(found) == 1
-    where, stage, control, code = found[0]
-    assert where.endswith('#UEXPLZ4@0') and stage == 'vs'
-    assert control[:4] == shader_split.CTL_MAGIC and code[:4] == shader_split.GFX_MAGIC
-    assert struct.unpack_from('<I', control, 0x704)[0] == len(code)
-    assert stats['flag01'] == 1 and stats['decoded'] == 1 and stats['rejected'] == 0
-    adjacent, adjacent_stats = ot2_uexp_static.extract_compact_lslg_shaders(
-        record + b'LSLGSP\0\0' + bytes(32), '/adjacent.uexp')
-    assert len(adjacent) == 1 and adjacent_stats['records'] == 2
-    assert adjacent_stats['decoded'] == 1 and adjacent_stats['flag00'] == 1
+    for delta in (1, 2):
+        record = compact_uexp_record(lslg_delta=delta)
+        found, stats = ot2_uexp_static.extract_compact_lslg_shaders(
+            record, f'/compact-minus-{delta}.uexp')
+        assert len(found) == 1
+        where, stage, control, code = found[0]
+        assert where.endswith('#UEXPLZ4@4') and stage == 'vs'
+        assert control[:4] == shader_split.CTL_MAGIC and code[:4] == shader_split.GFX_MAGIC
+        assert struct.unpack_from('<I', control, 0x704)[0] == len(code)
+        assert stats['records'] == 1 and stats['decoded'] == 1 and stats['rejected'] == 0
+        assert stats[f'candidate_success_start_minus_{delta}'] == 1
 
-    skipped, skip_stats = ot2_uexp_static.extract_compact_lslg_shaders(
-        b'LSLGSP\0\0' + bytes(32), '/flag00.uexp')
-    assert not skipped and skip_stats['flag00'] == 1
-    failed, fail_stats = ot2_uexp_static.extract_compact_lslg_shaders(
-        b'LSLGSV\0\1', '/truncated.uexp')
-    assert not failed and fail_stats['rejected'] == 1
-    assert fail_stats['decode_truncated_offset'] == 1
+    joined = (compact_uexp_record(lslg_delta=1) + bytes(7)
+              + compact_uexp_record(stage=b'SP', lslg_delta=2))
+    found, stats = ot2_uexp_static.extract_compact_lslg_shaders(joined, '/adjacent.uexp')
+    assert len(found) == 2 and stats['records'] == 2 and stats['decoded'] == 2
+    assert {shader[1] for shader in found} == {'vs', 'ps'}
+
+    truncated = bytearray(compact_uexp_record(lslg_delta=2))
+    struct.pack_into('<I', truncated, 0, struct.unpack_from('<I', truncated, 0)[0] - 1)
+    found, stats = ot2_uexp_static.extract_compact_lslg_shaders(
+        bytes(truncated), '/wrong-length.uexp')
+    assert not found and stats['records'] == 1 and stats['rejected'] == 1
+    assert stats['candidate_failure_lz4_invalid_block'] >= 1
+    assert sum(value for key, value in stats.items()
+               if key.startswith('rejected_reason_') and '_start_minus_' not in key) == 1
+
+    fake = b'LSLGSP' + bytes(32)
+    found, stats = ot2_uexp_static.extract_compact_lslg_shaders(fake, '/not-a-block.uexp')
+    assert not found and stats['records'] == 1 and stats['rejected'] == 1
 
 
 def test_runtime_merge():
     vertex, _ = ot2_uexp_static.extract_compact_lslg_shaders(
-        compact_uexp_record(b'SV'), '/static-vs.uexp')
+        compact_uexp_record(b'SV', lslg_delta=1), '/static-vs.uexp')
     pixel, _ = ot2_uexp_static.extract_compact_lslg_shaders(
-        compact_uexp_record(b'SP'), '/static-ps.uexp')
+        compact_uexp_record(b'SP', lslg_delta=2), '/static-ps.uexp')
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         for stem, shader in (
@@ -92,10 +114,9 @@ def test_runtime_merge():
         assert pairs == {(vertex_key, pixel_key)}
 
 
-
 def test_compact_global_shader_cache():
     name = 'Engine/GlobalShaderCache-SF_GLSL_SWITCH.bin'
-    fake = FakePak([name], {name: compact_uexp_record()})
+    fake = FakePak([name], {name: compact_uexp_record(lslg_delta=1)})
     path = 'synthetic.pak'
     shader_split._PAKS.pop(path, None)
     try:
@@ -105,7 +126,8 @@ def test_compact_global_shader_cache():
     finally:
         shader_split._PAKS.pop(path, None)
     assert len(found) == 1 and found[0][1] == 'vs'
-    assert found[0][0].endswith('#UEXPLZ4@0')
+    assert found[0][0].endswith('#UEXPLZ4@4')
+
 
 class FakePak:
     version = 11
