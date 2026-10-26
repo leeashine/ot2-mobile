@@ -62,8 +62,12 @@ You need an Apple silicon Mac on macOS 15 or later with Xcode 16 or later, your 
 git clone https://github.com/leeashine/ot2-mobile.git && cd ot2-mobile
 brew install xcodegen zstd spirv-cross glslang
 brew install --cask dotnet-sdk
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
 ```
+
+Homebrew Python may reject a global `pip install` with `externally-managed-environment`; use the virtual environment above instead.
 
 Use the full Xcode toolchain. If several Xcode versions are installed, prefer a scoped `DEVELOPER_DIR` so this build does not change other projects:
 
@@ -86,6 +90,8 @@ The classic-Metal sources are vendored; no `M3_GFX_DIR` environment variable is 
 
 The script extracts the game, rewrites its code modules, translates the shaders it can find and builds the Mac host, then prints the command that runs the game.
 
+The clean-clone Mac test took 775 seconds (~13 minutes) on this machine and produced a 3.5 GiB Mac shader cache. Build time and disk use vary by hardware and inputs.
+
 For an opted-in NVN profile whose static split finds no shaders, the Mac build runs a headless capture boot and collects complete runtime shaders before building the libraries. When defined, the profile's `nvn_capture_keys` supplies `DM_KEYS` input. This is separate from the interactive game command printed after the build.
 
 To collect shaders from an area not seen during the initial boot, run the printed Mac command, play through that area, then rerun the build:
@@ -96,7 +102,13 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 
 `--capture-more` merges complete local captures and rebuilds without starting the headless capture boot.
 
-**3. Play.** Click the game window first. A physical controller (Xbox, PlayStation, Switch Pro) works and is the most comfortable. On the keyboard:
+**3. Play.** From the repository root, run the launcher with the folder that holds your game dump:
+
+```sh
+scripts/ot2_play.sh ~/Games/OT2
+```
+
+The launcher uses `<NSP folder>/0100A3501946E000_build` by default; set `OT2_WORK` to override it. Saves stay in `<OT2_WORK>/run/save`. For manual launch, use the exact host command printed by the Mac build. Click the game window before using the keyboard. A physical controller (Xbox, PlayStation, Switch Pro) works and is the most comfortable.
 
 | Key | Button |
 |---|---|
@@ -107,7 +119,9 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 | X / Tab | X — main menu |
 | Y | Y |
 | Q / E, Z / C | L / R, ZL / ZR |
+| F / G | L3 / R3 |
 | P / O | + / − |
+| Cmd-Q | Quit |
 
 ## Getting started (iPhone)
 

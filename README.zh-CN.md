@@ -62,8 +62,12 @@ English: [README.md](README.md)
 git clone https://github.com/leeashine/ot2-mobile.git && cd ot2-mobile
 brew install xcodegen zstd spirv-cross glslang
 brew install --cask dotnet-sdk
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install lz4 capstone fonttools "backports.zstd; python_version < '3.14'"
 ```
+
+Homebrew Python 可能因 `externally-managed-environment` 拒绝全局 `pip install`；请改用上面的虚拟环境安装。
 
 请选择完整的 Xcode 工具链。安装多个 Xcode 版本时，优先为当前 shell 设置作用域内的 `DEVELOPER_DIR`，避免影响其他项目：
 
@@ -86,6 +90,8 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 
 脚本会解包游戏、改写代码模块、翻译能找到的 shader、编译 Mac 宿主，最后打印启动游戏的命令。
 
+本机 GitHub 干净克隆的首次 Mac 构建实测 775 秒（约 13 分钟），生成的 Mac shader cache 占用 3.5 GiB。耗时和磁盘占用会随机器与输入变化。
+
 对于启用了 NVN 运行时截取、且静态切分结果为 0 的 profile，Mac 构建会无窗口启动游戏来采集运行时 shader，然后构建这些 shader。若 profile 配置了 `nvn_capture_keys`，会按其 `DM_KEYS` 输入推进；该采集启动与构建完成后打印的交互式游戏命令相互独立。
 
 要补齐首次启动未覆盖区域的 shader，先用打印的 Mac 命令启动并游玩到目标区域，然后重新运行构建：
@@ -96,7 +102,13 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 
 `--capture-more` 会合并完整的本地截取并重建，不会再次自动启动无窗口采集流程。
 
-**3. 开始玩。** 先用鼠标点一下游戏窗口。实体手柄（Xbox、PlayStation、Switch Pro）可以直接用，也最顺手。键盘按键：
+**3. 开始玩。** 在仓库根目录运行启动脚本，并传入游戏文件所在目录：
+
+```sh
+scripts/ot2_play.sh ~/Games/OT2
+```
+
+默认使用 `<NSP 文件夹>/0100A3501946E000_build`；可设置 `OT2_WORK` 覆盖。存档保存在 `<OT2_WORK>/run/save`。手动启动时，运行 Mac 构建步骤打印的原始宿主命令。先用鼠标点一下游戏窗口。实体手柄（Xbox、PlayStation、Switch Pro）可以直接用，也最顺手。
 
 | 按键 | 对应 |
 |---|---|
@@ -107,7 +119,9 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 | X / Tab | X — 主菜单 |
 | Y | Y |
 | Q / E、Z / C | L / R、ZL / ZR |
+| F / G | L3 / R3 |
 | P / O | + / − |
+| Cmd-Q | 退出 |
 
 ## 上手（iPhone）
 
