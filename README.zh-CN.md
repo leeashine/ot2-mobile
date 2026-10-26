@@ -7,7 +7,7 @@
 English: [README.md](README.md)
 
 <p align="center">
-  <img src="docs/images/tavern-explore.jpg" width="100%" alt="Agnea 所在的酒馆，可自由走动，右下角是小地图">
+  <img src="docs/images/snow-town.jpg" width="100%" alt="夜晚的雪城：红色窗灯、火盆、头顶带对话气泡的村民，右下角是小地图">
 </p>
 <p align="center">
   <img src="docs/images/title.jpg" width="32%" alt="标题画面，HD-2D 城市背景">

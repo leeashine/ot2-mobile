@@ -7,7 +7,7 @@ Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, i
 中文: [README.zh-CN.md](README.zh-CN.md)
 
 <p align="center">
-  <img src="docs/images/tavern-explore.jpg" width="100%" alt="Agnea's tavern, free to walk around, with the minimap at the bottom right">
+  <img src="docs/images/snow-town.jpg" width="100%" alt="A snowy town at night: red-lit windows, braziers, villagers with speech bubbles, the minimap at the bottom right">
 </p>
 <p align="center">
   <img src="docs/images/title.jpg" width="32%" alt="The title screen with the HD-2D city background">
