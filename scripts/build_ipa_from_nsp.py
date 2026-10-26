@@ -1782,6 +1782,7 @@ def mac_run(py, repo, work, game, patched, msl, aoc, gfx, lang, env, logs, g, en
     if aoc: renv['DM_AOC_DIR'] = aoc
     if gfx == 'nvn':
         renv['DM_NVN_SHMAP'] = g.table('shader_map.tsv')
+        renv['OT2_NVN_OFFLINE_SHADERS'] = '1'
     renv.update(DM_LANG=lang, DM_WINDOW=1, DM_AUDIO=1)
     if env_file: renv.update(env_file_pairs(env_file))
     if gfx == 'nvn' and g.get('nvn_capture', '') == 'on': renv['OT2_NVN_HLE'] = '1'
