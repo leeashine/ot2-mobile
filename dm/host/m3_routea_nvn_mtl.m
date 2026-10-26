@@ -3139,7 +3139,7 @@ static int ot2_route_a_shader_mode(void) {
     static int mode = -1;
     if (mode < 0) {
         const char *value = getenv("OT2_NVN_OFFLINE_SHADERS");
-        mode = !(value && atoi(value));
+        mode = value && !strcmp(value, "0");
         if (!mode) MLOG("OT2 NVN shader mode: offline dm_ctl_sha16 libraries (Route B)");
     }
     return ot2_nvn_hle_enabled() && mode;
