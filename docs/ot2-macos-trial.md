@@ -137,6 +137,32 @@ pointer and must not be substituted for that layout. Synthetic regression
 checks cover 66/192 accepted and over-capacity rejection; a separate local smoke
 fed the actual 66-binding reflection to the classic parser successfully.
 
+### Pipeline look-ahead preserves the current scissor
+
+The classic Metal `pso_predict_rest` restored `S` after replaying future state
+commands, but `OP_SCISSOR` also writes `R.sc` and `R.has_sc`. A later pass's tiny
+rectangle leaked into the current draw, causing the green/white washout.
+The prediction now saves and restores both fields alongside `S`, without
+disabling prediction or changing shaders, exposure, bloom, or LUTs.
+Source: [nxnative's same-title diagnosis](https://github.com/seedds/nxnative/blob/main/docs/reference/shaders.md#the-precompile-look-ahead-restores-the-scissor).
+
+`t_m3_predict` feeds the actual look-ahead two future scissor commands and
+checks that neither the rectangle nor its enabled state leaks, starting with
+both `has_sc=0` and `has_sc=1`. Both cases failed before the fix and pass after;
+the test runs with the other classic Metal tests when `M3_GFX_DIR` is set.
+
+A same-save, same-input, present-4500 GPU readback of Osvald's prison-island
+square changed from near-white/green to a discernible snowy town. Both runs
+used the full offline shader cache and reported zero missing-map keys and
+zero library-load failures. The fixed host was rebuilt with the same Xcode
+16.4 toolchain as the frozen comparison host, and its log confirms prediction
+remained active. This verifies that scene, not global rendering parity.
+
+An Agnea save also produced green/white forest scenery on the frozen host and
+normal-coloured battle results on the fixed host. Those samples reached
+different gameplay stages, so they are not a strict same-location comparison
+and do not independently establish the Forest Path case's cause.
+
 ## Known gaps
 
 - Village traversal, the first Forest Path battle, and cold-start reload of a manual save are verified in single samples. Rebuilding the observed missing shaders removed the enemy/Gus black rectangles, but later effects exposed additional shader/geometry gaps; extended exploration and full rendering correctness remain unverified.
