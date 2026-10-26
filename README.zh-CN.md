@@ -10,17 +10,18 @@ English: [README.md](README.md)
   <img src="docs/images/tavern-explore.jpg" width="100%" alt="Agnea 所在的酒馆，可自由走动，右下角是小地图">
 </p>
 <p align="center">
-  <img src="docs/images/title.jpg" width="49%" alt="标题画面，HD-2D 城市背景">
-  <img src="docs/images/tavern-dialogue.jpg" width="49%" alt="Agnea 在酒馆舞台上：You're all too kind…">
+  <img src="docs/images/title.jpg" width="32%" alt="标题画面，HD-2D 城市背景">
+  <img src="docs/images/tavern-dialogue.jpg" width="32%" alt="Agnea 在酒馆舞台上：You're all too kind…">
+  <img src="docs/images/first-battle.jpg" width="32%" alt="森林里的第一场战斗，Gus 与带翅膀的敌人">
 </p>
 
 ## 当前状态
 
 | | |
 |---|---|
-| Mac | 新游戏 → 选择旅人 → Agnea 在酒馆的序章：可以行走、开菜单、对话，有声音，帧率为游戏原生的 30 帧。 |
-| 稳定性 | 实测在酒馆连续运行 31 分钟、在标题画面轮播场景下运行 21 分钟，均无崩溃；Mac 上常驻内存约 2.7 GB。内存仍有缓慢增长（约每小时 0.4 GB），连续数小时的游玩尚未测试。 |
-| Shader | 游戏已经用过的 shader 会被翻译并缓存；第一次去到的新地方可能有画面缺块（见[已知限制](#已知限制)）。 |
+| Mac | 新游戏 → Agnea 在酒馆的序章 → 走出酒馆到村子 → 第一场战斗（攻击、增强、破防）→ 存档后读档：全部可用，有声音，帧率为游戏原生的 30 帧。 |
+| 稳定性 | 实测在标题画面轮播场景下连续运行 2 小时、在酒馆运行 31 分钟，均无崩溃；Mac 上常驻内存峰值约 2.6 GB。内存仍有缓慢增长（约每小时 0.45 GB），超过约 2 小时的连续游玩尚未测试。 |
+| Shader | 构建时直接从你的游戏文件提取约 8,400 个 shader（不需要先玩一遍），其余在游戏第一次用到时截取。尚未截取到 shader 的地方，第一次去时可能有画面缺块（见[已知限制](#已知限制)）。 |
 | iPhone | 未签名的 iOS 18 应用可以编译（A17 Pro 及以上），**尚未在真机上运行过**。 |
 
 
@@ -45,6 +46,7 @@ English: [README.md](README.md)
 | 面向 macOS 15 / iOS 18 的经典 Metal（Metal 3）NVN 后端，来自 d2r-mobile，并加入八方旅人 II 的修复 | `dm/host/m3_routea_*`、`dm/host/m3gfx/` |
 | 虚幻引擎 4 内存分配器替换：用宿主的 malloc zone 代替 FMallocBinned3，让游戏能放进 3 GB 虚拟地址空间 | `dm/host/hle_uemalloc.c`、`dm/games/0100A3501946E000/patches.py` |
 | UE4 第 11 版 PAK 内嵌 shader 提取，以及对无法静态提取的 shader 的运行时截取兜底 | `dm/gfx/tools/uepak.py`、`shader_split.py`、`nvn_capture_split.py` |
+| 静态提取八方旅人 II 的精简 UEXP 材质 shader（独立 LZ4 记录），并与运行时截取按内容键合并 | `dm/gfx/tools/ot2_uexp_static.py` |
 | 从上游 nxnative 移植进经典后端：整数片元输出、把只选层的 geometry shader 折叠为分层顶点 shader（UE 的 3D 调色表）、按 NVN 深度模式选择入口 | `dm/host/m3_routea_nvn_mtl.m` |
 | 更顺手的 Mac 键盘映射：回车 / 空格确认，Esc 取消 | `dm/host/front_mac.m` |
 
@@ -117,7 +119,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/OT2 -k ~/keys/prod.keys --platform
 
 | 项目 | 状态 |
 |---|---|
-| Shader 覆盖 | 游戏的大部分 shader 以一种紧凑格式存放，目前还不能静态提取。游戏用过的 shader 会被截取并翻译；第一次去的地方在补齐之前可能有画面缺块。完整的静态提取正在进行。对于启用 NVN 运行时截取的 profile，首次 Mac 构建只会在静态切分结果为 0 时自动截取；访问新区域后可用 `--capture-more` 补齐。 |
+| Shader 覆盖 | 游戏约 73% 的材质 shader 记录可以静态提取（每条都是独立的 LZ4 块）；另外 27% 使用的变体格式还没解开，这部分改为运行时截取。首次 Mac 构建还会在后台无窗口启动一次游戏，截取标题和开场用到的 shader；去过新地方后，再加 `--capture-more` 重新构建即可补齐。 |
 | iPhone | 能编译，尚未真机测试。 |
 | 设备 | Mac 和 iPhone 版面向 Apple 芯片（A17 Pro / M1 及以上），不支持 Intel Mac。 |
 | 联网 | 不在范围内。 |

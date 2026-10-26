@@ -10,17 +10,18 @@ Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, i
   <img src="docs/images/tavern-explore.jpg" width="100%" alt="Agnea's tavern, free to walk around, with the minimap at the bottom right">
 </p>
 <p align="center">
-  <img src="docs/images/title.jpg" width="49%" alt="The title screen with the HD-2D city background">
-  <img src="docs/images/tavern-dialogue.jpg" width="49%" alt="Agnea on the tavern stage: You're all too kind…">
+  <img src="docs/images/title.jpg" width="32%" alt="The title screen with the HD-2D city background">
+  <img src="docs/images/tavern-dialogue.jpg" width="32%" alt="Agnea on the tavern stage: You're all too kind…">
+  <img src="docs/images/first-battle.jpg" width="32%" alt="The first battle in the forest, Gus and a winged foe">
 </p>
 
 ## Status
 
 | | |
 |---|---|
-| Mac | New game → traveler select → Agnea's prologue in the tavern: walking, menus, dialogue and sound work, at the game's native 30 fps. |
-| Stability | Ran 31 minutes in the tavern and 21 minutes on the title screen's rotating scenes without a crash; about 2.7 GB resident on the Mac. Memory still grows slowly (about 0.4 GB per hour); sessions of several hours are untested. |
-| Shaders | Shaders the game has already used are translated and cached; places you have not visited yet may show missing pieces the first time (see [Known limitations](#known-limitations)). |
+| Mac | New game → Agnea's prologue in the tavern → out into her village → the first battle (attack, Boost, Break) → save and reload: all work, with sound, at the game's native 30 fps. |
+| Stability | Ran 2 hours on the title screen's rotating scenes and 31 minutes in the tavern without a crash; about 2.6 GB resident at peak on the Mac. Memory still grows slowly (about 0.45 GB per hour); sessions longer than about 2 hours are untested. |
+| Shaders | About 8,400 shaders are extracted straight from your game files at build time (no play-through needed); the rest are captured the first time the game uses them. A place whose shaders are not yet captured may show missing pieces the first time (see [Known limitations](#known-limitations)). |
 | iPhone | The unsigned app builds for iOS 18 (A17 Pro and later). It has **not been run on a real device yet**. |
 
 
@@ -45,6 +46,7 @@ Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, i
 | Classic-Metal (Metal 3) NVN backend for macOS 15 / iOS 18, vendored from d2r-mobile with OT2 fixes | `dm/host/m3_routea_*`, `dm/host/m3gfx/` |
 | Unreal Engine 4 allocator cut: FMallocBinned3 replaced by the host's malloc zone, so the game fits in a 3 GB virtual address space | `dm/host/hle_uemalloc.c`, `dm/games/0100A3501946E000/patches.py` |
 | UE4 version-11 PAK inline shaders and a runtime-capture fallback for shaders that cannot be extracted statically | `dm/gfx/tools/uepak.py`, `shader_split.py`, `nvn_capture_split.py` |
+| Static extraction of OT2's compact UEXP material shaders (standalone LZ4 records), merged with runtime captures by content key | `dm/gfx/tools/ot2_uexp_static.py` |
 | Ported from upstream nxnative into the classic backend: integer fragment outputs, slice-writing geometry shaders folded into layered vertex shaders (UE's 3D color-grading LUT), and NVN depth-mode entry selection | `dm/host/m3_routea_nvn_mtl.m` |
 | Friendlier Mac keyboard: Return/Space confirm, Esc cancel | `dm/host/front_mac.m` |
 
@@ -117,7 +119,7 @@ The same script packs an unsigned IPA for iOS 18 (A17 Pro and later). Sign it wi
 
 | Item | Status |
 |---|---|
-| Shader coverage | The game keeps most shaders in a compact form that cannot yet be extracted statically. Shaders the game has used are captured and translated; a place you visit for the first time may show missing pieces until they are. Full static extraction is in progress. For opted-in NVN profiles, the first Mac build automatically captures shaders only when static splitting finds none; use `--capture-more` after visiting new areas. |
+| Shader coverage | About 73% of the game's material shader records are extracted statically (each is a standalone LZ4 block). The other 27% use a variant whose format is not decoded yet; those shaders are captured at run time instead. The first Mac build also boots the game headless once to capture the title and opening; after visiting new areas, run the build again with `--capture-more`. |
 | iPhone | Builds; not yet tested on a device. |
 | Devices | Mac and iPhone builds target Apple silicon (A17 Pro / M1 and later). Intel Macs are not supported. |
 | Online | Out of scope. |
