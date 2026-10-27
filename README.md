@@ -1,8 +1,17 @@
 # OT2 Mobile
 
-**Octopath Traveler II, running natively on Mac — and next, on iPhone.** This is a fork of [nxnative](https://github.com/seedds/nxnative) that brings the Nintendo Switch release of *Octopath Traveler II* (1.1.1) to Apple devices: the game's own arm64 program runs directly on the Apple chip, and its graphics are rebuilt on Metal. It adds a classic-Metal (Metal 3) graphics backend so the game runs on **macOS 15 and iOS 18**, without waiting for Metal 4.
+**Octopath Traveler II, running natively on Mac and iPhone.** This is a fork of [nxnative](https://github.com/seedds/nxnative) that brings the Nintendo Switch release of *Octopath Traveler II* (1.1.1) to Apple devices: the game's own arm64 program runs directly on the Apple chip, and its graphics are rebuilt on Metal. It adds a classic-Metal (Metal 3) graphics backend so the game runs on **macOS 15 and iOS 18**, without waiting for Metal 4.
 
-Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, iOS 18 or later; packaging works, not yet tested on a device) · Game version: Switch 1.1.1 · License: MIT · **Bring your own game files**
+Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, iOS 18 or later; verified running on a physical iPhone 18 Pro) · Game version: Switch 1.1.1 · License: MIT · **Bring your own game files**
+
+## Current status
+
+| | |
+|---|---|
+| Mac | New game → Agnea's tavern prologue → village → first battle (attack, boost, break) → save and reload: all work, with sound, at the game's native 30 fps. |
+| Stability | 2 hours in the title attract scenes and 31 minutes in the tavern without a crash; Mac resident-memory peak about 2.6 GB. Memory still grows slowly (~0.45 GB/hour); longer continuous play remains unverified. |
+| Shaders | All 13,942 unique shaders from 62,547 records are extracted directly from your game files during the build; no play-through is needed and new areas do not show missing pieces. |
+| iPhone | Successfully launched and reached the town scene on a physical iPhone 18 Pro; the screenshot showed 30 fps. Longer play and stability are not yet verified. |
 
 中文: [README.zh-CN.md](README.zh-CN.md)
 
@@ -22,7 +31,7 @@ Platforms: Mac (Apple silicon, macOS 15 or later) · iPhone (A17 Pro or later, i
 | Mac | New game → Agnea's prologue in the tavern → out into her village → the first battle (attack, Boost, Break) → save and reload: all work, with sound, at the game's native 30 fps. |
 | Stability | Ran 2 hours on the title screen's rotating scenes and 31 minutes in the tavern without a crash; about 2.6 GB resident at peak on the Mac. Memory still grows slowly (about 0.45 GB per hour); sessions longer than about 2 hours are untested. |
 | Shaders | All of the game's shaders — 13,942 unique, from 62,547 records — are extracted straight from your game files at build time, so no play-through is needed and new areas do not show missing pieces. |
-| iPhone | The unsigned app builds for iOS 18 (A17 Pro and later). It has **not been run on a real device yet**. |
+| iPhone | Successfully launched and reached the town scene on a physical iPhone 18 Pro; the screenshot showed 30 fps. Longer play and stability are not yet verified. |
 
 
 ## What it is, and what it is not
@@ -125,16 +134,14 @@ The launcher uses `<NSP folder>/0100A3501946E000_build` by default; set `OT2_WOR
 
 ## Getting started (iPhone)
 
-<!-- TODO(verify): IPA packaging steps after the device test. -->
-
-The same script packs an unsigned IPA for iOS 18 (A17 Pro and later). Sign it with the **Increased Memory Limit** capability (`com.apple.developer.kernel.increased-memory-limit`). It has not been run on a real device yet; reports are welcome.
+The same script packs an unsigned IPA for iOS 18 (A17 Pro and later). Sign it with the **Increased Memory Limit** capability (`com.apple.developer.kernel.increased-memory-limit`). The app has been run on a physical iPhone 18 Pro and reached the town scene; extended play has not yet been verified.
 
 ## Known limitations
 
 | Item | Status |
 |---|---|
 | Shader coverage | Every shader record in the game's files is decoded statically (each is a u32 size followed by one LZ4 block). The first Mac build may also boot the game headless once and merge any runtime captures; `--capture-more` merges captures from later play. First builds take longer, since all 13,942 shaders are translated to Metal. |
-| iPhone | Builds; not yet tested on a device. |
+| iPhone | Successfully launched and reached gameplay on a physical iPhone 18 Pro; extended play and stability are not yet verified. |
 | Devices | Mac and iPhone builds target Apple silicon (A17 Pro / M1 and later). Intel Macs are not supported. |
 | Online | Out of scope. |
 

@@ -295,8 +295,20 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;
         module_t *mm = module_of((void *)regs[30]);
+        uint64_t tid = 0;
+        char thread_name[64] = "";
         static int nb;
-        LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
+        extern uint32_t thr_cur_handle(void);
+        (void)pthread_threadid_np(NULL, &tid);
+        (void)pthread_getname_np(pthread_self(), thread_name, sizeof thread_name);
+        LOG("Break#%d reason=%#llx Result=%#x svc at %s+%#llx caller=%s+%#llx "
+            "thread=%#x os_tid=%llu name='%s' x1=%#llx x2=%#llx fp=%#llx "
+            "x19=%#llx x20=%#llx x21=%#llx x22=%#llx x23=%#llx x24=%#llx x25=%#llx x26=%#llx x27=%#llx x28=%#llx",
+            ++nb, regs[0], res, mm ? mm->name : "?", orig_addr,
+            mm ? mm->name : "?", mm ? (unsigned long long)((uint8_t *)regs[30] - mm->base) : regs[30],
+            thr_cur_handle(), (unsigned long long)tid, thread_name,
+            regs[1], regs[2], regs[29], regs[19], regs[20], regs[21], regs[22], regs[23], regs[24],
+            regs[25], regs[26], regs[27], regs[28]);
         if (g_flag.dbg) { void dm_ue_memory_report(void); svc_memory_report(); dm_ue_memory_report(); }
         dm_backtrace(regs[29]);
         if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue

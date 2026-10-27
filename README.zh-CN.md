@@ -1,8 +1,17 @@
 # OT2 Mobile
 
-**八方旅人 II，原生运行在 Mac 上，下一步是 iPhone。** 本项目是 [nxnative](https://github.com/seedds/nxnative) 的分支，把 Nintendo Switch 版《八方旅人 II》（1.1.1）带到苹果设备上：游戏自己的 arm64 程序直接在苹果芯片上执行，图形在 Metal 上重建。项目新增了经典 Metal（Metal 3）图形后端，因此可以在 **macOS 15 / iOS 18** 上运行，不必等 Metal 4。
+**八方旅人 II，已在 Mac 和 iPhone 上原生运行。** 本项目是 [nxnative](https://github.com/seedds/nxnative) 的分支，把 Nintendo Switch 版《八方旅人 II》（1.1.1）带到苹果设备上：游戏自己的 arm64 程序直接在苹果芯片上执行，图形在 Metal 上重建。项目新增了经典 Metal（Metal 3）图形后端，因此可以在 **macOS 15 / iOS 18** 上运行，不必等 Metal 4。
 
-平台：Mac（Apple 芯片，macOS 15 及以上）· iPhone（A17 Pro 及以上，iOS 18 及以上；能打包，尚未在真机上测试）· 游戏版本：Switch 1.1.1 · 许可：MIT · **需自备游戏文件**
+平台：Mac（Apple 芯片，macOS 15 及以上）· iPhone（A17 Pro 及以上，iOS 18 及以上；已在 iPhone 18 Pro 真机运行）· 游戏版本：Switch 1.1.1 · 许可：MIT · **需自备游戏文件**
+
+## 当前状态
+
+| | |
+|---|---|
+| Mac | 新游戏 → Agnea 在酒馆的序章 → 走出酒馆到村子 → 第一场战斗（攻击、增强、破防）→ 存档后读档：全部可用，有声音，帧率为游戏原生的 30 帧。 |
+| 稳定性 | 标题画面轮播场景连续运行 2 小时、酒馆运行 31 分钟均无崩溃；Mac 常驻内存峰值约 2.6 GB。内存仍缓慢增长（约每小时 0.45 GB）；更长时间的连续游玩尚未验证。 |
+| Shader | 构建时直接从你的游戏文件提取全部 shader（62,547 条记录，去重后 13,942 个），不需要先玩一遍，去新地方也不会缺画面。 |
+| iPhone | 已在 iPhone 18 Pro 真机启动并进入村庄场景；截图显示 30 帧。长时间游玩和稳定性尚未验证。 |
 
 English: [README.md](README.md)
 
@@ -125,9 +134,7 @@ scripts/ot2_play.sh ~/Games/OT2
 
 ## 上手（iPhone）
 
-<!-- TODO(verify): 真机测试后补充 IPA 打包步骤。 -->
-
-同一个脚本可以打包面向 iOS 18 的未签名 IPA（A17 Pro 及以上）。签名时请加上 **Increased Memory Limit** 权限（`com.apple.developer.kernel.increased-memory-limit`）。目前还没有在真机上运行过，欢迎反馈。
+同一个脚本可以打包面向 iOS 18 的未签名 IPA（A17 Pro 及以上）。签名时请加上 **Increased Memory Limit** 权限（`com.apple.developer.kernel.increased-memory-limit`）。应用已在 iPhone 18 Pro 真机启动并进入村庄场景；长时间游玩尚未验证。
 
 ## 已知限制
 
