@@ -1,5 +1,6 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController). Both are merged and handed to the host through dm_input_set (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode; one tap on the layout button at the top centre (labelled with the current layout, "2D" / "3D" / "Tap") goes to the next, and the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   Easy (the OT2 default): the left stick, the A B X Y diamond and a "···" key at the top (inward of ZR); L / R / ZL / ZR / − / + show only while "···" is open and close again once one of them is released. A short tap on no control presses A (menus and dialogue).
 //   Tap (touch): no control but the layout button, every other touch goes to the game's touch screen; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -24,7 +25,7 @@
 #include "haptics_apple.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
-enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
+enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME, C_MORE, C_TAPA };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8); C_MORE: the "···" key of the Easy layout; C_TAPA: a touch that is a tap on A if it stays short and still
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_pad_btn, g_shake_btn;
@@ -88,9 +89,12 @@ static const CGFloat
     K_DPAD_GRAB = 1.3,                              // D-pad grab radius (times the outer edge)
     K_RSTICK_R = 60,                                // right stick (not drawn): radius around its centre, the touch-down point
     K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
-    K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+    K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+    // Easy layout
+    K_MORE_R = 20,                                  // "···" key: radius (at the L3 / R3 place of the right side)
+    K_TAP_MOVE = 16, K_TAP_SECS = 0.5, K_TAP_PULSE = 0.08;   // a tap on A: the finger stays within this many points and lifts within this many seconds; A is held for the last number of seconds                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
-static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap, 3 = Easy (DM_GAME_PAD_LAYOUT's numbers)
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
@@ -109,7 +113,10 @@ static __weak DmGamepad *g_view;
     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
-    BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
+    BOOL _full, _tap, _easy, _more;                // the 3D / Tap / Easy layout is current; Easy: the "···" key is open
+    CAShapeLayer *_moreKey; CATextLayer *_moreLabel; BOOL _moreHeld;
+    NSMapTable<UITouch *, NSArray<NSNumber *> *> *_tapFrom;   // C_TAPA touches: where and when each landed (x, y, timestamp)
+    uint64_t _pulse;                               // keys held for a moment after a tap (A)
     CALayer *_controls;                            // holds every control layer: hidden while a physical controller is connected (the view itself stays, for game touches)
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
@@ -155,10 +162,12 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
         }
         _swap = shape(_controls); _swapLabel = label(_swap, @"");
+        _moreKey = shape(_controls); _moreLabel = label(_moreKey, @"\u00b7\u00b7\u00b7");
+        _tapFrom = [NSMapTable strongToStrongObjectsMapTable];
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
-        _full = l == 1; _tap = l == 2;
+        _full = l == 1; _tap = l == 2; _easy = l == 3;
         [self applyLayout];
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged) name:GCControllerDidConnectNotification object:nil];
@@ -170,15 +179,21 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    for (int b = 0; b < B_N; b++) _key[b].hidden = _tap || (fullOnly(b) && !_full);
+    for (int b = 0; b < B_N; b++) _key[b].hidden = [self keyHidden:b];
     _ring.hidden = _knob.hidden = _tap;
-    _swapLabel.string = _tap ? @"Tap" : _full ? @"3D" : @"2D";
+    _moreKey.hidden = !_easy;
+    _moreLabel.string = _more ? @"\u00d7" : @"\u00b7\u00b7\u00b7";
+    _swapLabel.string = _tap ? @"Tap" : _easy ? @"Easy" : _full ? @"3D" : @"2D";
     [CATransaction commit];
 }
-- (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → 2D: release every touch first (no key stays held), save, lay out again
-    int l = _tap ? 0 : _full ? (dm_opmode() == 0 ? 2 : 0) : 1;
+- (BOOL)keyHidden:(int)b {   // not shown (and not hit) in the current layout
+    BOOL shoulder = isDrop(b) || b == B_PLUS || b == B_MINUS;
+    return _tap || (fullOnly(b) && !_full) || (_easy && shoulder && !_more);
+}
+- (void)nextLayout {   // 2D → 3D (→ Tap in handheld mode) → Easy → 2D: release every touch first (no key stays held), save, lay out again
+    int l = _easy ? 0 : _tap ? 3 : _full ? (dm_opmode() == 0 ? 2 : 3) : 1;
     [self reset];
-    _full = l == 1; _tap = l == 2;
+    _full = l == 1; _tap = l == 2; _easy = l == 3; _more = NO;
     [NSUserDefaults.standardUserDefaults setObject:@(l) forKey:k_layout_key];
     [self applyLayout]; [self setNeedsLayout];
 }
@@ -201,6 +216,7 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
 - (CGFloat)dpadR { return K_DPAD_R * self.u; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
 static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
+static CGFloat dist(CGPoint a, CGPoint b);
 - (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
     return side(s, b == B_ZR || b == B_R, (z ? K_ZL_X : K_L_X) * u, CGRectGetMinY(s) + (z ? K_ZL_Y : K_L_Y) * u); }
 - (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u; }
@@ -208,13 +224,15 @@ static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
 - (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, w = K_PILL_W * u, h = K_PILL_H * u;
     CGPoint c = CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + K_PILL_Y * u);   // − on the left, + on the right
     return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
+- (CGPoint)moreCenter { return [self clickCenter:B_RS]; }
+- (BOOL)inMore:(CGPoint)p { return dist(p, self.moreCenter) <= K_MORE_R * self.u * 1.35; }
 - (CGPoint)swapCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + K_PILL_Y * self.u); }
 
 static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
 - (int)btnAt:(CGPoint)p {   // locked keys (tested on touch-down only, then locked)
     CGFloat u = self.u;
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
-        if (fullOnly(b) && !_full) continue;
+        if ([self keyHidden:b]) continue;
         BOOL hit = isDrop(b) ? dist(p, [self dropCenter:b]) <= [self dropR:b] * 1.35
                  : isClick(b) ? dist(p, [self clickCenter:b]) <= K_CLICK_R * u * 1.35
                  : CGRectContainsPoint(CGRectInset([self pillRect:b], -8 * u, -8 * u), p);
@@ -247,11 +265,12 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 // ---- Touch ----
 - (void)recompute {
     uint64_t face = 0; for (UITouch *t in _faceOf) face |= [_faceOf objectForKey:t].unsignedLongLongValue;
-    uint64_t btn = 0, dpad = 0; BOOL swap = NO;
+    uint64_t btn = _pulse, dpad = 0; BOOL swap = NO, more = NO;
     for (UITouch *t in _owner) { uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff);
         if (c == C_BTN) btn |= 1ull << (v >> 8);
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]];
-        else if (c == C_SWAP) swap = YES; }
+        else if (c == C_SWAP) swap = YES;
+        else if (c == C_MORE) more = YES; }
     int32_t ax[4] = {0};
     for (int i = 0; i < 2; i++) {
         CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD;
@@ -259,14 +278,14 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGFloat m = fmin((d - dz) / (R * K_FULL - dz), 1) / d;   // outside the dead zone: 0 rising to full at the full-tilt radius
         ax[i * 2] = (int32_t)lrint(o.x * m * 32767); ax[i * 2 + 1] = (int32_t)lrint(-o.y * m * 32767);   // host: up is positive; rounded so full tilt is exactly 32767
     }
-    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld;
+    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || swap != _swapHeld || more != _moreHeld;
     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
     unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
-    if (pressed || (swap && !_swapHeld) || (gripping & ~_hapticSticks)) {
+    if (pressed || (swap && !_swapHeld) || (more && !_moreHeld) || (gripping & ~_hapticSticks)) {
         [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
     }
     _hapticSticks = gripping;
-    _faceBits = face; _dpadBits = dpad; _btnBits = btn; _swapHeld = swap;
+    _faceBits = face; _dpadBits = dpad; _btnBits = btn; _swapHeld = swap; _moreHeld = more;
     pthread_mutex_lock(&g_mu);
     g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
@@ -300,6 +319,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGPoint p = [t locationInView:self]; int hit = _tap ? -1 : [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
         if ([self inSwap:p]) { [_owner setObject:@(C_SWAP) forKey:t]; continue; }
+        if (_easy && [self inMore:p]) { [_owner setObject:@(C_MORE) forKey:t]; continue; }
         if (_tap) { game |= [self gameBegin:t]; continue; }
         // diamond, D-pad, left stick: take the one with the smallest distance / grab radius, if it is <= 1
         CGFloat best = 1; int kind = C_NONE, idx = 0;
@@ -310,6 +330,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
+        else if (_easy) { [_owner setObject:@(C_TAPA) forKey:t]; [_tapFrom setObject:@[@(p.x), @(p.y), @(t.timestamp)] forKey:t]; }
         else game |= [self gameBegin:t];
     }
     if (game) [self pushGame];
@@ -329,9 +350,15 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     [self recompute];
 }
 - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
-    BOOL swap = NO, game = NO;
+    BOOL swap = NO, game = NO, more = NO, tap = NO, shoulder = NO;
     for (UITouch *t in ts) {
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue;
+        if (ended && (v & 0xff) == C_MORE && [self inMore:[t locationInView:self]]) more = YES;
+        if ((v & 0xff) == C_BTN) shoulder = YES;
+        NSArray<NSNumber *> *from = [_tapFrom objectForKey:t];
+        if (ended && from) { CGPoint p = [t locationInView:self];
+            tap |= hypot(p.x - from[0].doubleValue, p.y - from[1].doubleValue) <= K_TAP_MOVE * self.u && t.timestamp - from[2].doubleValue <= K_TAP_SECS; }
+        [_tapFrom removeObjectForKey:t];
         if (ended && (v & 0xff) == C_SWAP && [self inSwap:[t locationInView:self]]) swap = YES;   // layout button: counts only when released on the button
         if ((v & 0xff) == C_GAME && (v >> 8) < 16) { _game[v >> 8] = nil; game = YES; }
         [_owner removeObjectForKey:t]; [_faceOf removeObjectForKey:t]; for (int i = 0; i < 2; i++) if (t == _stick[i]) _stick[i] = nil;
@@ -339,10 +366,22 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (game) [self pushGame];
     [self recompute];
     if (swap) [self nextLayout];
+    else if (more || (shoulder && _easy && _more)) [self setMore:more ? !_more : NO];
+    if (tap) [self tapA];
+}
+- (void)setMore:(BOOL)on {   // the Easy layout's shoulder keys: open / closed (a held one is released when it closes)
+    if (on == _more) return;
+    _more = on;
+    [self applyLayout];
+    if (!on) [self recompute];
+}
+- (void)tapA {   // a short tap on no control presses A for a moment
+    _pulse |= 1ull << B_A; [self recompute];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(K_TAP_PULSE * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ self->_pulse &= ~(1ull << B_A); [self recompute]; });
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset { _pulse = 0; [_tapFrom removeAllObjects]; [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
@@ -393,6 +432,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     }
     static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
     for (int i = 0; i < 4; i++) setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * u, K_ARM_IN * u, arms[i].angle, 6 * u));
+    CGPoint mc = self.moreCenter; setPath(_moreKey, circlePath(mc, K_MORE_R * u)); placeLabel(_moreLabel, mc, 16 * u);
     CGPoint sc = self.swapCenter; setPath(_swap, circlePath(sc, K_SWAP_R * u)); placeLabel(_swapLabel, sc, 12 * u);
     setPath(_ring, circlePath(self.stickHome, [self stickR:0]));
     CGFloat k = K_KNOB_R * u; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
@@ -408,6 +448,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
         _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
+    _moreKey.fillColor = (_moreHeld || _more ? k_on : k_idle).CGColor; _moreLabel.foregroundColor = (_moreHeld || _more ? k_textOn : k_text).CGColor;
     _swap.fillColor = (_swapHeld ? k_on : k_idle).CGColor; _swapLabel.foregroundColor = (_swapHeld ? k_textOn : k_text).CGColor;
     CGPoint h = self.stickHome, o = [self knobOffset:0];
     _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;

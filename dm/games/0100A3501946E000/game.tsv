@@ -19,6 +19,7 @@ mem_reserve	0x140000000
 mem_alias	0x118000000
 mem_stack	0x10000000
 app_pool	0xCD500000
+pad_layout	easy
 sys_resource	0x5000000
 
 shader_groups	GlobalShaderCache=global Majesty=game ShaderArchive-Global-=global ShaderArchive-=game

@@ -105,8 +105,8 @@ def header(g):
     if aba not in ('on', 'off'): sys.exit(f'{g.id}: alloc_big_align must be on or off: {aba}')
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
-    pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
-    if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen)
+    pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3), easy = the stick, A B X Y and a "···" key that opens the shoulder keys (a tap on no control presses A),
+    if pl not in ('simple', 'full', 'touch', 'easy'): sys.exit(f'{g.id}: pad_layout must be simple, full, touch or easy: {pl}')   # touch = Tap (no control: every touch goes to the game's touch screen)
     fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
     if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
     afr = g.words('alpha_from_red', '')   # fragment shader key prefixes that read single-channel textures mapped (R, 0, 0, 1) with alpha = red (nvn_mtl.m tex_alpha_red); none by default
@@ -157,7 +157,7 @@ def header(g):
          f'#define DM_GAME_FPS_TARGET {int(ft)}',
          f'#define DM_GAME_FPS_HOLD {int(fh == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
-         f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
+         f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch", "easy").index(pl)}',
          f'#define DM_GAME_OPMODE {int(om == "console")}',
          f'#define DM_GAME_PERF_BOOST {int(pm == "boost")}',
          f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
