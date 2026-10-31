@@ -34,12 +34,14 @@ run: $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/
 	$(B)/t_haptics_apple
 	$(B)/t_nro
 	$(B)/t_uemalloc
+	$(B)/t_widescreen
 	$(OT2_MEMORY_TEST)
 	$(M3_BINDING_TEST)
 	$(M3_SNAPSHOT_TEST)
 	$(M3_PREDICT_TEST)
 run: $(B)/t_nro
 run: $(B)/t_uemalloc
+run: $(B)/t_widescreen
 run: $(OT2_MEMORY_TEST)
 run: $(M3_BINDING_TEST)
 run: $(M3_SNAPSHOT_TEST)
@@ -57,6 +59,11 @@ $(B)/t_ot2_memory_budget: t_ot2_memory_budget.c ../hle_svc.c ../hle_uemalloc.c .
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_ot2_memory_budget.c
 $(B)/t_uemalloc: t_uemalloc.c ../hle_uemalloc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_uemalloc.c
+$(B)/t_widescreen: t_widescreen.c ../hle_widescreen.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	clang -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_widescreen.c
+.PHONY: widescreen
+widescreen: $(B)/t_widescreen
+	$(B)/t_widescreen
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	clang -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro

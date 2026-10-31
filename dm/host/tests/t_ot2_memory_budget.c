@@ -16,6 +16,7 @@ void dm_backtrace(uint64_t fp) { (void)fp; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 uint64_t dm_entropy64(void) { return 1; }
 int thr_limit_used(void) { return 0; }
+uint32_t thr_cur_handle(void) { return 0; }
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 
