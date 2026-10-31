@@ -213,6 +213,15 @@ void front_run(void (*guest)(void)) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSRect r = NSMakeRect(0, 0, 1280, 720);
+        // Match an explicitly requested test canvas; presentation still aspect-fits
+        // the actual game image when the user resizes the window.
+        const char *window_aspect = getenv("DM_WINDOW_ASPECT");
+        if (window_aspect) {
+            char *end; double aspect = strtod(window_aspect, &end);
+            if (!*end && isfinite(aspect) && aspect >= 1 && aspect <= 3.6)
+                r.size.height = round(r.size.width / aspect);
+            else LOG("[RED] DM_WINDOW_ASPECT must be a number from 1 to 3.6");
+        }
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
