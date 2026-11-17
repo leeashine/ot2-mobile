@@ -2156,7 +2156,10 @@ static uint64_t present_period(const win_t *o) {
     return hz > 0 ? (uint64_t)(itv * 1e9 / hz) : 0;
 }
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
+// Apply the same build-identified engine limits as the other NVN backend.
+__attribute__((weak)) void dm_fps_lock_tick(void) {}
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
+    dm_fps_lock_tick();
     uint64_t trace = nvn_sync_trace_begin("nvnQueuePresentTexture", w, idx >= 0 ? (uint64_t)idx : 0, 0);
     uint64_t job_id = 0, source_serial = 0;
     (void)q; win_t *o = (win_t *)w; o->presents++;

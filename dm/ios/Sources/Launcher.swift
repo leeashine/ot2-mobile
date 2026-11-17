@@ -54,7 +54,16 @@ private struct SettingRow: View {
         Section {
             switch s.kind {
             case "choice":
-                Picker(s.label, selection: m.binding(s)) { ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) } }
+                // This full-screen launcher has no NavigationStack. Do not let
+                // automatic picker style choose a navigation-based presentation.
+                if (s.options ?? []).count == 2 {
+                    VStack(alignment: .leading) {
+                        Text(s.label)
+                        choicePicker.pickerStyle(.segmented)
+                    }
+                } else {
+                    choicePicker.pickerStyle(.menu)
+                }
             case "range":
                 let lo = s.min ?? 0, hi = s.max ?? 1
                 let v = Binding<Double>(get: { Double(m.values[s.env] ?? s.def) ?? hi }, set: { m.values[s.env] = String(format: "%.2f", $0) })
@@ -71,6 +80,13 @@ private struct SettingRow: View {
             if !note.isEmpty { Text(note) }
         }
         .disabled(locked)
+    }
+
+    private var choicePicker: some View {
+        Picker(s.label, selection: m.binding(s)) {
+            ForEach(s.options ?? [], id: \.[0]) { Text($0[1]).tag($0[0]) }
+        }
+        .accessibilityIdentifier(s.env)
     }
 }
 

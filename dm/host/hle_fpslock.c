@@ -15,6 +15,11 @@ enum { FPS_F32, VSYNCS_I32, MS_F32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; } k_locks[] = {
+    // OCTOPATH TRAVELER II 1.1.1: UTF-16 console-variable name references in the
+    // registration functions at main+0x2e37e4c and main+0x1334ac4. Each constructor
+    // stores AsVariableFloat/Int at object+0x10 (0x2e37e88 / 0x1334afc).
+    { "65619a04b8a04b10d44f9996ef141062", "Unreal t.MaxFPS", 0x76b7f58 + 0x10, 0, FPS_F32, 2 },
+    { "65619a04b8a04b10d44f9996ef141062", "Unreal rhi.SyncInterval", 0x75660d0 + 0x10, 0, VSYNCS_I32, 2 },
     // Monster Hunter Rise 16.0.2: RE Engine's frame limit, a float at [main+0x1295b3f0]+0x434 (the pointer is a global in main's bss). The frame loop (main+0x6b106c8) sleeps until
     // [+0x430] / [+0x434] sixtieths of a second have passed ([+0x430] = 60) and steps the game by the time that really passed (+0x41c), so a higher limit runs the game faster in frames
     // at the same speed. The game sets 30 after boot; it also asks for present interval 2, which the profile's present_interval display ignores.

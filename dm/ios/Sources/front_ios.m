@@ -1,4 +1,5 @@
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
+// iOS front end: an aspect-fitted Metal view, or a full-window view for an
+// automatically configured game, plus the full-screen virtual gamepad layer.
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -9,6 +10,7 @@
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
+#import "DisplayConfig.h"
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
@@ -20,6 +22,42 @@ static CAMetalLayer *g_layer;
 static void front_ios_power_watch(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
+
+static BOOL prepare_display(UIView *view) {
+    NSURL *url = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"dm/display.json"];
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    const char *mode = getenv("DM_RESOLUTION");
+    // Keep older env files working when no menu selection has been applied.
+    if (!mode) mode = getenv("DM_DISPLAY_AUTO") && !atoi(getenv("DM_DISPLAY_AUTO")) ? "original" : "auto";
+    if (!data || !strcmp(mode, "original")) return YES;
+    NSError *error = nil;
+    NSDictionary *manifest = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    UIScreen *screen = view.window.windowScene.screen ?: view.window.screen;
+    CGSize bounds = view.bounds.size;
+    DMDisplaySize size = dm_display_resolution(mode, bounds.width, bounds.height, screen.nativeScale);
+    NSData *pak = [manifest isKindOfClass:NSDictionary.class] && [manifest[@"game"] isEqualToString:@DM_GAME_ID]
+        ? dm_display_pak(manifest, size, &error) : nil;
+    NSString *temp = getenv("DM_TEMP") ? @(getenv("DM_TEMP")) : nil;
+    NSString *root = [temp stringByAppendingPathComponent:@"display-overlay"];
+    NSString *relative = [manifest isKindOfClass:NSDictionary.class] ? manifest[@"overlay_path"] : nil;
+    if (![relative isKindOfClass:NSString.class] || relative.isAbsolutePath || [relative.pathComponents containsObject:@".."])
+        return NO;
+    NSString *dest = [root stringByAppendingPathComponent:relative];
+    if (!pak || !root || ![NSFileManager.defaultManager createDirectoryAtPath:dest.stringByDeletingLastPathComponent
+        withIntermediateDirectories:YES attributes:nil error:&error] || ![pak writeToFile:dest options:NSDataWritingAtomic error:&error]) {
+        LOG("[RED] automatic display configuration failed: %s", error.localizedDescription.UTF8String ?: "invalid manifest or window size");
+        return NO;
+    }
+    NSString *aspect = [NSString stringWithFormat:@"%.12f", (double)size.width / size.height];
+    // Runtime profile and camera must always describe the same render canvas.
+    setenv("DM_CAMERA_ASPECT", aspect.UTF8String, 1); setenv("DM_HUD_ASPECT", aspect.UTF8String, 1);
+    setenv("DM_VIEW_ASPECT", "display", 1);
+    NSString *overlay = getenv("DM_ROMFS_OVERLAY") ? [NSString stringWithFormat:@"%@:%s", root, getenv("DM_ROMFS_OVERLAY")] : root;
+    setenv("DM_ROMFS_OVERLAY", overlay.fileSystemRepresentation, 1);
+    LOG("display resolution %s: window %.1fx%.1f points, screen scale %.3f, output %dx%d, aspect %s",
+        mode, bounds.width, bounds.height, screen.nativeScale, size.width, size.height, aspect.UTF8String);
+    return YES;
+}
 
 @interface DmGameView : UIView
 @end
@@ -37,6 +75,9 @@ static UILabel *front_ios_fps_label(void);
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    // A foldable or external screen need not be UIScreen.mainScreen.
+    UIScreen *screen = self.window.windowScene.screen ?: self.window.screen;
+    if (screen) l.contentsScale = screen.nativeScale;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
@@ -67,6 +108,13 @@ static void launcher_done(void) { [g_root startGame]; }
 // The game view, the pad and the frame-rate counter are made once the launcher has set the switches they read (DM_SHOW_FPS, DM_METAL_HUD); the host's loading began at app launch (main.m)
 - (void)startGame {
     if (self.game) return;
+    [self.view layoutIfNeeded];
+    if (!prepare_display(self.view)) {
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Display setup failed"
+            message:@"Restart the game in landscape orientation. See log.txt for details." preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:a animated:YES completion:nil]; return;
+    }
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when a device is made: before the game view makes its own (an env file's DM_METAL_HUD sets it in main.m already)
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
@@ -85,9 +133,24 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    CGFloat w = b.size.width, h = b.size.height;
+    // Modified game projections can use the complete display. The renderer
+    // still aspect-fits the game image; this does not stretch or crop it.
+    const char *fit = getenv("DM_VIEW_ASPECT");
+    BOOL whole = fit && !strcmp(fit, "display");
+    if (!whole) {
+        if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
+    }
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
+    self.pad.frame = b;
+    if (whole) {
+        static CGSize last;
+        if (!CGSizeEqualToSize(last, b.size)) {
+            last = b.size;
+            LOG("front end: full display bounds %.1fx%.1f points, game %.1fx%.1f, screen scale %.3f",
+                b.size.width, b.size.height, w, h, self.view.window.windowScene.screen.nativeScale);
+        }
+    }
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);

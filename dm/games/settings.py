@@ -36,6 +36,8 @@ def build(gid, patched, control):
     def shown(cond, n):
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
+        if cond == 'display-config':
+            return Path(os.environ.get('DM_DISPLAY_CONFIG', '')).is_file()
         if cond.startswith('fixups:'): return cond[7:] in keys
         m = re.fullmatch(r'(DM_GAME_\w+)(!=|==)(.*)', cond)
         if m: return (macro(m[1], n) == m[3]) == (m[2] == '==')
